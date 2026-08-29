@@ -1,0 +1,6 @@
+# dsh-feedback-bridge bundle patch: insert this package as one host row.
+# The row name is the package name; the Loader imports its main export and
+# applies it once webServer is available in the composed Web profile.
+- insert:
+    - id: dsh-feedback-bridge
+      name: 'dsh-feedback-bridge'
