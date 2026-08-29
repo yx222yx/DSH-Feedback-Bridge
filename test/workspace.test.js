@@ -38,13 +38,13 @@ function loadClientExports(React = createBaseReact(), win = {}) {
 
 const zhHeadings = {
   scenario: '场景',
-  gap: '当前缺口或行为',
+  gap: '你碰到的问题或情况',
   desired: '期望结果',
   context: '补充上下文',
 };
 const enHeadings = {
   scenario: 'Scenario',
-  gap: 'Current gap or behavior',
+  gap: 'The problem or situation you encountered',
   desired: 'Desired result',
   context: 'Additional context',
 };
@@ -88,7 +88,7 @@ test('buildDraftMarkdown renders the exact expected markdown for a fully filled 
     '',
     '我经常在对话中想调用自定义工具。',
     '',
-    '## 当前缺口或行为',
+    '## 你碰到的问题或情况',
     '',
     'Harness 没有公开的注册接口。',
     '',
@@ -159,7 +159,7 @@ test('buildDraftMarkdown uses English section headings for an English workspace 
     '',
     'I want to call a custom tool in conversations.',
     '',
-    '## Current gap or behavior',
+    '## The problem or situation you encountered',
     '',
     'Harness exposes no public registration interface.',
   ].join('\n');
@@ -360,7 +360,7 @@ test('opening the workspace starts a custom-feedback session and typing updates 
     '',
     '我经常在对话中想调用自定义工具。',
     '',
-    '## 当前缺口或行为',
+    '## 你碰到的问题或情况',
     '',
     'Harness 没有公开的注册接口。',
     '',

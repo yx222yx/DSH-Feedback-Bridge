@@ -14,7 +14,7 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   route.
 - A dedicated **社区反馈** left-navigation entry in the Web GUI sidebar opens the
   community-feedback workspace: a custom-feedback draft with title, scenario,
-  current gap or behavior, desired result, and additional context; an exact
+  your problem or situation, desired result, and additional context; an exact
   Markdown review card; copy-to-clipboard and .md export; and manual submission
   guidance linking to the official DeepSeek Harness Discussions. Copy, export,
   and cancel make zero GitHub writes and zero external network requests.

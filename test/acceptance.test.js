@@ -244,7 +244,7 @@ test('browser click-through: left-nav 社区反馈 entry opens the workspace, ex
         '',
         'I often want to call custom tools in conversations.',
         '',
-        '## Current gap or behavior',
+        '## The problem or situation you encountered',
         '',
         'Harness exposes no public plugin registration interface.',
         '',

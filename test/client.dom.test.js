@@ -174,7 +174,7 @@ test('feedback workspace renders the five editable fields, type badge, preview a
   assert.match(html, /## 场景\n\n场景示例/);
   assert.match(html, /## 期望结果\n\n期望示例/);
   // Optional empty sections are absent from the exact Markdown.
-  assert.doesNotMatch(html, /当前缺口或行为\n\n<\/pre>/);
+  assert.doesNotMatch(html, /你碰到的问题或情况\n\n<\/pre>/);
   assert.match(html, /data-testid="dsh-feedback-copy">复制草稿<\/button>/);
   assert.match(html, /data-testid="dsh-feedback-export">导出草稿<\/button>/);
   assert.match(html, /data-testid="dsh-feedback-cancel">取消<\/button>/);
