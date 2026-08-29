@@ -9,6 +9,14 @@ DSH Feedback Bridge（DSH 社区反馈桥）is a DeepSeek Harness plugin that he
 - Read `docs/AGENTS.md` before implementing or changing DeepSeek Harness integration.
 - Apply upstream DSH rules only where they are relevant to an independently maintained plugin; do not assume this repository has the upstream monorepo layout or release process.
 
+## TypeScript baseline
+
+- Treat `src/` TypeScript and TSX files as the only production-code source of truth. Add and change production code in TypeScript.
+- Treat `lib/` as generated build output. Generate it through the repository build scripts; never edit or commit it by hand.
+- Keep Host and Client compiler faces separate. Browser code must not import Node-only modules.
+- Use official exported DeepSeek Harness and Cordis types where available. Keep any required local compatibility type narrow and document the missing upstream type it represents.
+- Tests may remain JavaScript when that matches the existing test setup. Run type checking, the build, and relevant tests for production-code changes; verify the packed prebuilt JavaScript artifact for packaging changes.
+
 ## Project boundaries
 
 - Keep the plugin compatible with the documented DeepSeek Harness plugin interfaces.
