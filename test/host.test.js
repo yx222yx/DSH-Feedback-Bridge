@@ -4,6 +4,7 @@ import { Context } from '@deepseek-ai/cordis';
 import {
   apply,
   assertCompatibleDsh,
+  compatibilityRangeOf,
   detectDshVersion,
   inject,
   isDshVersionCompatible,
@@ -62,10 +63,25 @@ test('detectDshVersion prefers the explicit test override', () => {
   else process.env.DSH_VERSION = previous;
 });
 
-test('assertCompatibleDsh throws a clear message for an incompatible version', () => {
+test('compatibilityRangeOf fails loud when the manifest field is missing', () => {
+  assert.throws(
+    () => compatibilityRangeOf({}),
+    /dsh-feedback-bridge: package\.json must declare a non-empty dsh\.compatibility\.dsh range/,
+  );
+  assert.equal(
+    compatibilityRangeOf({ dsh: { compatibility: { dsh: '>=0.1.1-rc.2 <0.2.0' } } }),
+    '>=0.1.1-rc.2 <0.2.0',
+  );
+});
+
+test('assertCompatibleDsh throws a clear message for an incompatible or undetectable version', () => {
   assert.throws(
     () => assertCompatibleDsh('0.0.9'),
     /dsh-feedback-bridge: incompatible DeepSeek Harness version 0\.0\.9; this bundle supports >=0\.1\.1-rc\.2 <0\.2\.0\./,
+  );
+  assert.throws(
+    () => assertCompatibleDsh(null),
+    /dsh-feedback-bridge: unable to detect DeepSeek Harness version; this bundle supports >=0\.1\.1-rc\.2 <0\.2\.0\./,
   );
   assert.doesNotThrow(() => assertCompatibleDsh('0.1.1-rc.2'));
 });

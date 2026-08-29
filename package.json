@@ -22,6 +22,7 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-settings-general"
       ],
       "platform": "web"
@@ -35,6 +36,8 @@
     "test:pack": "npm pack --dry-run"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   }
 }
