@@ -3,6 +3,21 @@ import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 
+/** Five editable draft fields a persisted record must carry as strings. */
+export interface DraftFields {
+  title: string;
+  scenario: string;
+  gap: string;
+  desired: string;
+  context: string;
+}
+
+/** A persisted draft record: schema version plus the five fields and updatedAt. */
+export interface StoredDraft extends DraftFields {
+  version: typeof DRAFT_SCHEMA_VERSION;
+  updatedAt: string;
+}
+
 /**
  * On-disk schema version of the persisted feedback draft. Bump on any
  * incompatible change to the stored record; unknown versions are quarantined
@@ -11,13 +26,13 @@ import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/prom
 export const DRAFT_SCHEMA_VERSION = 1;
 
 /** Draft fields a persisted record must carry as strings. */
-const DRAFT_FIELDS = ['title', 'scenario', 'gap', 'desired', 'context'];
+const DRAFT_FIELDS = ['title', 'scenario', 'gap', 'desired', 'context'] as const;
 
 /**
  * True on native Windows. POSIX permission guarantees (0600/0700) are
  * hard-asserted only here; Windows carries no equivalent ACL claim.
  */
-function isWindows() {
+function isWindows(): boolean {
   return process.platform === 'win32';
 }
 
@@ -30,7 +45,7 @@ function isWindows() {
  * @param env - environment mapping; defaults to process.env.
  * @returns the normalized absolute harness home path.
  */
-export function resolveDshHome(env = process.env) {
+export function resolveDshHome(env: NodeJS.ProcessEnv = process.env): string {
   const fromEnv = env.DSH_HOME;
   if (fromEnv !== undefined && fromEnv.trim().length > 0) {
     const expanded = fromEnv.startsWith('~/') || fromEnv.startsWith('~\\')
@@ -48,7 +63,7 @@ export function resolveDshHome(env = process.env) {
  * @param dshHome - harness home; defaults to resolveDshHome().
  * @returns the draft file path.
  */
-export function draftFilePath(dshHome = resolveDshHome()) {
+export function draftFilePath(dshHome: string = resolveDshHome()): string {
   return join(dshHome, 'dsh-feedback-bridge', 'draft.json');
 }
 
@@ -59,12 +74,13 @@ export function draftFilePath(dshHome = resolveDshHome()) {
  * @param record - parsed JSON value.
  * @returns true when the record is a valid version-1 draft.
  */
-function isStoredDraft(record) {
+function isStoredDraft(record: unknown): record is StoredDraft {
   if (record === null || typeof record !== 'object' || Array.isArray(record)) return false;
-  if (record.version !== DRAFT_SCHEMA_VERSION) return false;
-  if (typeof record.updatedAt !== 'string') return false;
+  const candidate = record as Record<string, unknown>;
+  if (candidate.version !== DRAFT_SCHEMA_VERSION) return false;
+  if (typeof candidate.updatedAt !== 'string') return false;
   for (const key of DRAFT_FIELDS) {
-    if (typeof record[key] !== 'string') return false;
+    if (typeof candidate[key] !== 'string') return false;
   }
   return true;
 }
@@ -76,12 +92,13 @@ function isStoredDraft(record) {
  * @param draft - draft fields to persist.
  * @throws {Error} naming the first non-string field.
  */
-function assertDraftFields(draft) {
+function assertDraftFields(draft: unknown): asserts draft is DraftFields {
   if (draft === null || typeof draft !== 'object' || Array.isArray(draft)) {
     throw new Error('draft must be an object');
   }
+  const candidate = draft as Record<string, unknown>;
   for (const key of DRAFT_FIELDS) {
-    if (typeof draft[key] !== 'string') {
+    if (typeof candidate[key] !== 'string') {
       throw new Error(`draft field ${key} must be a string`);
     }
   }
@@ -96,7 +113,7 @@ function assertDraftFields(draft) {
  * @returns void.
  * @throws {Error} when the stat mode differs from the expectation.
  */
-async function assertPosixMode(filePath, expected) {
+async function assertPosixMode(filePath: string, expected: number): Promise<void> {
   if (isWindows()) return;
   const mode = (await stat(filePath)).mode & 0o777;
   if (mode !== expected) {
@@ -113,7 +130,7 @@ async function assertPosixMode(filePath, expected) {
  * @returns the quarantine path.
  * @throws {Error} when the rename fails.
  */
-async function isolateCorrupt(filePath) {
+async function isolateCorrupt(filePath: string): Promise<string> {
   const quarantine = `${filePath}.corrupt-${Date.now()}-${randomBytes(4).toString('hex')}`;
   await rename(filePath, quarantine);
   return quarantine;
@@ -130,9 +147,9 @@ async function isolateCorrupt(filePath) {
  * @param draft - five string draft fields.
  * @returns the persisted record.
  */
-export async function save(filePath, draft) {
+export async function save(filePath: string, draft: DraftFields): Promise<StoredDraft> {
   assertDraftFields(draft);
-  const record = { version: DRAFT_SCHEMA_VERSION, ...draft, updatedAt: new Date().toISOString() };
+  const record: StoredDraft = { version: DRAFT_SCHEMA_VERSION, ...draft, updatedAt: new Date().toISOString() };
   const serialized = JSON.stringify(record, null, 2) + '\n';
   const dir = dirname(filePath);
   await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -176,15 +193,15 @@ export async function save(filePath, draft) {
  * @param filePath - target draft file path.
  * @returns the stored record or null.
  */
-export async function load(filePath) {
-  let content;
+export async function load(filePath: string): Promise<StoredDraft | null> {
+  let content: string;
   try {
     content = await readFile(filePath, 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
-  let record;
+  let record: unknown;
   try {
     record = JSON.parse(content);
   } catch {
@@ -205,10 +222,10 @@ export async function load(filePath) {
  * @param filePath - target draft file path.
  * @returns void.
  */
-export async function remove(filePath) {
+export async function remove(filePath: string): Promise<void> {
   try {
     await unlink(filePath);
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }

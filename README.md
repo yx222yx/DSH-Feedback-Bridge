@@ -55,10 +55,14 @@ shows the Host status payload.
 
 ```sh
 pnpm install
-pnpm test
+pnpm typecheck   # strict check of the Host and Client source trees
+pnpm test        # builds lib/ from src/, then runs the full suite
 ```
 
-The acceptance tests pack the bundle, install it into a clean `DSH_HOME` Web
+`src/` is the single authoritative TypeScript implementation; `pnpm test`
+regenerates `lib/` (Host via tsc, Client bundle via esbuild) before running,
+so the suite always exercises the generated runtime artifacts. The acceptance
+tests pack the bundle, install it into a clean `DSH_HOME` Web
 profile, and boot DSH without a DeepSeek API key or GitHub account. One test
 drives a real headless-browser click-through of the complete left-navigation to
 export path and asserts zero GitHub and zero external network requests. The

@@ -48,7 +48,7 @@ test('save creates the missing parent directory recursively', async () => {
   }
 });
 
-test('POSIX save hard-asserts 0700 on the directory and 0600 on the file', async () => {
+test('POSIX save hard-asserts 0700 on the directory and 0600 on the file', { skip: process.platform === 'win32' }, async () => {
   const dir = tempDir();
   try {
     const filePath = join(dir, 'sub', 'draft.json');

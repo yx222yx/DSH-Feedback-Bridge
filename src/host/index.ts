@@ -1,6 +1,9 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { draftFilePath, load, remove, save } from './draft-store.js';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Context } from '@deepseek-ai/cordis';
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
+import { draftFilePath, load, remove, save, type DraftFields } from './draft-store.js';
 
 const name = 'dsh-feedback-bridge';
 const inject = ['webServer'];
@@ -12,12 +15,18 @@ const DRAFT_PATH = '/dsh-feedback-bridge/draft';
 /** Hard cap on the draft request body: a draft is five text fields. */
 const MAX_DRAFT_BODY_BYTES = 1 << 20;
 
+/** Package manifest fields the plugin reads at load. */
+interface ManifestShape {
+  version?: unknown;
+  dsh?: { compatibility?: { dsh?: unknown } };
+}
+
 /**
  * Read this package's own manifest once. `import.meta.url` lives inside
  * `lib/index.js`, so the package root is one directory up.
  */
 const manifestUrl = new URL('../package.json', import.meta.url);
-const manifest = JSON.parse(readFileSync(manifestUrl, 'utf8'));
+const manifest: ManifestShape = JSON.parse(readFileSync(manifestUrl, 'utf8'));
 
 /**
  * Extract the supported DSH version range from a parsed package manifest.
@@ -26,7 +35,7 @@ const manifest = JSON.parse(readFileSync(manifestUrl, 'utf8'));
  * @returns the non-empty compatibility range string.
  * @throws {Error} when `dsh.compatibility.dsh` is missing or empty.
  */
-export function compatibilityRangeOf(sourceManifest) {
+export function compatibilityRangeOf(sourceManifest: ManifestShape | null | undefined): string {
   const range = sourceManifest?.dsh?.compatibility?.dsh;
   if (typeof range !== 'string' || range.trim() === '') {
     throw new Error(
@@ -38,13 +47,21 @@ export function compatibilityRangeOf(sourceManifest) {
 
 const compatibilityRange = compatibilityRangeOf(manifest);
 
+/** Parsed semver-shaped version parts. */
+interface ParsedVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string | null;
+}
+
 /**
  * Parse a semver-shaped version into comparable parts.
  *
  * @param raw - version string such as `0.1.1-rc.2`.
  * @returns parsed version parts, or null when the string is not semver-shaped.
  */
-function parseVersion(raw) {
+function parseVersion(raw: string): ParsedVersion | null {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(raw).trim());
   if (match === null) return null;
   return {
@@ -62,8 +79,8 @@ function parseVersion(raw) {
  * @param b - right parsed version.
  * @returns comparison delta.
  */
-function compareParsed(a, b) {
-  for (const key of ['major', 'minor', 'patch']) {
+function compareParsed(a: ParsedVersion, b: ParsedVersion): number {
+  for (const key of ['major', 'minor', 'patch'] as const) {
     const delta = a[key] - b[key];
     if (delta !== 0) return delta;
   }
@@ -80,7 +97,7 @@ function compareParsed(a, b) {
  * @param b - right prerelease label.
  * @returns comparison delta.
  */
-function comparePrerelease(a, b) {
+function comparePrerelease(a: string, b: string): number {
   const left = a.split('.');
   const right = b.split('.');
   const length = Math.max(left.length, right.length);
@@ -111,10 +128,10 @@ function comparePrerelease(a, b) {
  * @param range - range string such as `>=0.1.1-rc.2 <0.2.0`.
  * @returns lower and upper bounds.
  */
-function parseRange(range) {
+function parseRange(range: string): { min: string | null; max: string | null } {
   const parts = range.trim().split(/\s+/).filter(Boolean);
-  let min = null;
-  let max = null;
+  let min: string | null = null;
+  let max: string | null = null;
   for (const part of parts) {
     if (part.startsWith('>=')) min = part.slice(2);
     else if (part.startsWith('<')) max = part.slice(1);
@@ -129,7 +146,7 @@ function parseRange(range) {
  * @param range - supported range; defaults to this package's declared range.
  * @returns true when the version is inside the range.
  */
-export function isDshVersionCompatible(version, range = compatibilityRange) {
+export function isDshVersionCompatible(version: string, range: string = compatibilityRange): boolean {
   const parsed = parseVersion(version);
   const bounds = parseRange(range);
   if (parsed === null) return false;
@@ -151,14 +168,14 @@ export function isDshVersionCompatible(version, range = compatibilityRange) {
  *
  * @returns detected DSH version, or null when the CLI cannot be identified.
  */
-export function detectDshVersion() {
+export function detectDshVersion(): string | null {
   if (process.env.DSH_VERSION !== undefined && process.env.DSH_VERSION !== '') {
     return process.env.DSH_VERSION;
   }
   const invoked = process.argv[1];
   if (invoked === undefined) return null;
 
-  let real;
+  let real: string;
   try {
     real = realpathSync(invoked);
   } catch (error) {
@@ -173,7 +190,7 @@ export function detectDshVersion() {
 
   try {
     const manifestContent = readFileSync(new URL('../package.json', pathToFileURL(real)), 'utf8');
-    const parsed = JSON.parse(manifestContent);
+    const parsed = JSON.parse(manifestContent) as { version?: unknown };
     return typeof parsed.version === 'string' ? parsed.version : null;
   } catch (error) {
     // readFileSync or JSON.parse fails only when the DSH CLI layout differs
@@ -193,7 +210,7 @@ export function detectDshVersion() {
  * @throws {Error} when the version is outside the supported range or cannot
  * be detected.
  */
-export function assertCompatibleDsh(version = detectDshVersion()) {
+export function assertCompatibleDsh(version: string | null = detectDshVersion()): void {
   if (version === null) {
     throw new Error(
       `dsh-feedback-bridge: unable to detect DeepSeek Harness version; this bundle supports ${compatibilityRange}.`,
@@ -211,8 +228,17 @@ export function assertCompatibleDsh(version = detectDshVersion()) {
  *
  * @returns package version string.
  */
-export function ownVersion() {
+export function ownVersion(): string {
   return typeof manifest.version === 'string' ? manifest.version : '0.0.0';
+}
+
+/** Host status payload served to the Client. */
+export interface StatusPayload {
+  name: string;
+  status: string;
+  version: string;
+  dshVersion: string | null;
+  compatible: boolean | null;
 }
 
 /**
@@ -221,7 +247,7 @@ export function ownVersion() {
  * @param dshVersion - detected DSH version; defaults to detectDshVersion().
  * @returns status payload object.
  */
-export function statusPayload(dshVersion = detectDshVersion()) {
+export function statusPayload(dshVersion: string | null = detectDshVersion()): StatusPayload {
   return {
     name: 'DSH Feedback Bridge',
     status: 'loaded',
@@ -240,7 +266,12 @@ export function statusPayload(dshVersion = detectDshVersion()) {
  * @param extraHeaders - additional response headers.
  * @returns void.
  */
-function writeJson(response, status, payload, extraHeaders = {}) {
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  payload: unknown,
+  extraHeaders: Record<string, string> = {},
+): void {
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
@@ -249,42 +280,51 @@ function writeJson(response, status, payload, extraHeaders = {}) {
   response.end(JSON.stringify(payload));
 }
 
+/** Error carrying an HTTP status code for wire-boundary failures. */
+type HttpError = Error & { statusCode: number };
+
+/** Create an error with a wire-boundary HTTP status code. */
+function httpError(statusCode: number, message: string): HttpError {
+  const error = new Error(message) as HttpError;
+  error.statusCode = statusCode;
+  return error;
+}
+
 /**
  * Read a request body as JSON with a hard byte cap. The error thrown carries
  * a statusCode of 413 when the cap is exceeded.
  *
  * @param request - the incoming request.
  * @returns the parsed JSON value.
- * @throws {Error} with statusCode 400 for empty or malformed JSON, 413 for
+ * @throws {HttpError} with statusCode 400 for empty or malformed JSON, 413 for
  * an oversized body.
  */
-async function readJsonBody(request) {
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   let size = 0;
-  const chunks = [];
+  const chunks: Buffer[] = [];
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
     if (size > MAX_DRAFT_BODY_BYTES) {
-      const error = new Error('draft request body exceeds the size limit');
-      error.statusCode = 413;
-      throw error;
+      throw httpError(413, 'draft request body exceeds the size limit');
     }
     chunks.push(buffer);
   }
   const text = Buffer.concat(chunks).toString('utf8');
   if (text.trim() === '') {
-    const error = new Error('request body must be JSON');
-    error.statusCode = 400;
-    throw error;
+    throw httpError(400, 'request body must be JSON');
   }
   try {
     return JSON.parse(text);
   } catch {
-    const error = new Error('request body must be valid JSON');
-    error.statusCode = 400;
-    throw error;
+    throw httpError(400, 'request body must be valid JSON');
   }
 }
+
+/** A validated draft write: remove, or save with exactly five string fields. */
+type DraftWrite =
+  | { action: 'remove'; draft: null }
+  | { action: 'save'; draft: DraftFields };
 
 /**
  * Validate a draft write body: an object with action `save` (plus exactly
@@ -295,15 +335,16 @@ async function readJsonBody(request) {
  * @returns the validated action and draft fields.
  * @throws {Error} describing the first invalid aspect.
  */
-function parseDraftWrite(body) {
+function parseDraftWrite(body: unknown): DraftWrite {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new Error('body must be an object');
   }
-  if (body.action === 'remove') return { action: 'remove', draft: null };
-  if (body.action !== 'save') {
-    throw new Error(`unsupported action: ${String(body.action)}`);
+  const record = body as Record<string, unknown>;
+  if (record.action === 'remove') return { action: 'remove', draft: null };
+  if (record.action !== 'save') {
+    throw new Error(`unsupported action: ${String(record.action)}`);
   }
-  const draft = body.draft;
+  const draft = record.draft;
   if (draft === null || typeof draft !== 'object' || Array.isArray(draft)) {
     throw new Error('draft must be an object');
   }
@@ -311,11 +352,11 @@ function parseDraftWrite(body) {
   const keys = Object.keys(draft);
   if (
     keys.length !== expected.length
-    || expected.some((key) => !(key in draft) || typeof draft[key] !== 'string')
+    || expected.some((key) => !(key in draft) || typeof (draft as Record<string, unknown>)[key] !== 'string')
   ) {
     throw new Error('draft must contain exactly the five string fields: title, scenario, gap, desired, context');
   }
-  return { action: 'save', draft };
+  return { action: 'save', draft: draft as DraftFields };
 }
 
 /**
@@ -327,7 +368,7 @@ function parseDraftWrite(body) {
  * @param response - the server response.
  * @returns void.
  */
-async function handleDraftRequest(request, response) {
+async function handleDraftRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const filePath = draftFilePath();
   if (request.method === 'GET') {
     try {
@@ -339,19 +380,19 @@ async function handleDraftRequest(request, response) {
     return;
   }
   if (request.method === 'POST') {
-    let body;
+    let body: unknown;
     try {
       body = await readJsonBody(request);
     } catch (error) {
-      if (error.statusCode === 413) request.resume?.();
-      writeJson(response, error.statusCode ?? 400, { error: error.message });
+      if ((error as HttpError).statusCode === 413) request.resume?.();
+      writeJson(response, (error as HttpError).statusCode ?? 400, { error: (error as Error).message });
       return;
     }
-    let parsed;
+    let parsed: DraftWrite;
     try {
       parsed = parseDraftWrite(body);
     } catch (error) {
-      writeJson(response, 400, { error: error.message });
+      writeJson(response, 400, { error: (error as Error).message });
       return;
     }
     try {
@@ -377,7 +418,7 @@ async function handleDraftRequest(request, response) {
  * @param ctx - Cordis context carrying the `webServer` service.
  * @returns void.
  */
-export function apply(ctx) {
+export function apply(ctx: Context): void {
   assertCompatibleDsh();
   ctx.effect(() => {
     return ctx.webServer.register({
@@ -386,13 +427,13 @@ export function apply(ctx) {
       handler(_request, response) {
         writeJson(response, 200, statusPayload());
       },
-    });
+    } satisfies WebRoute);
   }, 'dsh-feedback-bridge: status route');
   ctx.effect(() => {
     return ctx.webServer.register({
       kind: 'exact',
       path: DRAFT_PATH,
       handler: handleDraftRequest,
-    });
+    } satisfies WebRoute);
   }, 'dsh-feedback-bridge: draft route');
 }
