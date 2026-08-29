@@ -125,8 +125,20 @@ function sessionsWith(draft) {
       return draft;
     },
     update() {},
+    restore() {},
     cancel() {},
     dispose() {},
+  };
+}
+
+/** SSR-safe persistence stub: renderToStaticMarkup never runs effects. */
+function persistenceStub() {
+  return {
+    load: async () => null,
+    save: async () => true,
+    remove: async () => true,
+    keepalive() {},
+    generation: () => 0,
   };
 }
 
@@ -161,9 +173,10 @@ test('feedback workspace renders the five editable fields, type badge, preview a
     desired: '期望示例',
     context: '',
   };
-  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), onClose: () => {} }, 'zh');
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), onClose: () => {} }, 'zh');
   assert.match(html, /data-testid="dsh-feedback-workspace"/);
   assert.match(html, /data-testid="dsh-feedback-type">自定义反馈<\/span>/);
+  assert.match(html, /data-testid="dsh-feedback-draft-label">进行中的草稿<\/span>/);
   assert.match(html, /data-testid="dsh-feedback-title"/);
   assert.match(html, /data-testid="dsh-feedback-scenario"/);
   assert.match(html, /data-testid="dsh-feedback-gap"/);
@@ -182,7 +195,7 @@ test('feedback workspace renders the five editable fields, type badge, preview a
 });
 
 test('feedback workspace guidance links to the official DSH Discussions destination', () => {
-  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), onClose: () => {} }, 'zh');
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), onClose: () => {} }, 'zh');
   assert.match(html, /data-testid="dsh-feedback-guidance"/);
   assert.match(html, /href="https:\/\/github\.com\/deepseek-ai\/deepseek-harness\/discussions"/);
   assert.match(html, /人工提交指引/);
@@ -197,8 +210,9 @@ test('feedback workspace renders English labels and English markdown headings wh
     desired: '',
     context: '',
   };
-  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), onClose: () => {} }, 'en');
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), onClose: () => {} }, 'en');
   assert.match(html, /data-testid="dsh-feedback-type">Custom feedback<\/span>/);
+  assert.match(html, /data-testid="dsh-feedback-draft-label">In-progress draft<\/span>/);
   assert.match(html, /data-testid="dsh-feedback-copy">Copy draft<\/button>/);
   assert.match(html, /# Add a plugin API/);
   assert.match(html, /## Scenario\n\nI want to call custom tools\./);

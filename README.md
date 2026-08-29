@@ -3,12 +3,14 @@
 一个 DeepSeek Harness 插件，帮助用户将功能想法和错误反馈整理为清晰、注重隐私的 GitHub Discussions。
 A DeepSeek Harness plugin that helps users turn feature ideas and bug reports into clear, privacy-aware GitHub Discussions.
 
-## v0.1 slice (Issue #2 and #3)
+## v0.1 slice (Issue #2, #3, and #4)
 
 The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
 
 - Host plugin `dsh-feedback-bridge` loads once `webServer` is available and exposes
-  `GET /dsh-feedback-bridge/status`.
+  `GET /dsh-feedback-bridge/status` plus `GET|POST /dsh-feedback-bridge/draft`
+  (the draft route limits the JSON body size and rejects unexpected methods and
+  actions).
 - Client plugin registers a “DSH Feedback Bridge” status section in the Web GUI
   settings surface (plugin status only) and reads the Host status through that
   route.
@@ -16,10 +18,26 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   community-feedback workspace: a custom-feedback draft with title, scenario,
   your problem or situation, desired result, and additional context; an exact
   Markdown review card; copy-to-clipboard and .md export; and manual submission
-  guidance linking to the official DeepSeek Harness Discussions. Copy, export,
-  and cancel make zero GitHub writes and zero external network requests.
+  guidance linking to the official DeepSeek Harness Discussions.
+- The in-progress draft is persisted on the Host at
+  `<DSH_HOME>/dsh-feedback-bridge/draft.json` (schema `{version, title, scenario,
+  gap, desired, context, updatedAt}`): edits autosave, a page reload or DSH
+  restart resumes the draft, closing flushes any pending save, and 取消 asks for
+  an explicit confirmation before discarding. Export always keeps the draft
+  (“已导出，草稿仍保留”). Corrupt or unknown-version files are quarantined instead
+  of silently overwritten; a confirmed discard can never be undone by a late
+  autosave. Copy, export, autosave, and discard make zero GitHub writes and zero
+  external network requests.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
+
+### Persistence known limitations
+
+- Only the DSH `web` profile is supported in v0.1. DSH exposes no reliable
+  profile-identity interface, so other profiles sharing the same `DSH_HOME` may
+  observe the same draft file.
+- Only one in-progress draft exists at a time; there is no draft history and no
+  submitted-record separation yet.
 
 ## Install
 

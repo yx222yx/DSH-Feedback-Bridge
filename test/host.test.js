@@ -86,11 +86,12 @@ test('assertCompatibleDsh throws a clear message for an incompatible or undetect
   assert.doesNotThrow(() => assertCompatibleDsh('0.1.1-rc.2'));
 });
 
-test('host registers the status route through webServer and disposes it on unload', async () => {
+test('host registers the status and draft routes through webServer and disposes them on unload', async () => {
   const harness = createHarness();
   const { fiber, restore } = await harness.load();
   try {
-    assert.equal(harness.routes.size, 1);
+    assert.equal(harness.routes.size, 2);
+    assert.ok(harness.routes.has('/dsh-feedback-bridge/draft'));
     const route = harness.routes.get('/dsh-feedback-bridge/status');
     assert.ok(route);
     assert.equal(route.kind, 'exact');

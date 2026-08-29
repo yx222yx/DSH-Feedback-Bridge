@@ -37,6 +37,44 @@ function run(command, args, options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', ...options });
 }
 
+/** Dismiss the sequential first-run modals ("Internal Testing Notice" then
+ * "Add an API key to get started") that cover the sidebar on a clean profile.
+ * No-op once every modal is gone. */
+async function dismissFirstRunModals(page) {
+  await page.waitForSelector('[role="dialog"]', { timeout: 60_000 }).catch(() => {});
+  for (let step = 0; step < 6; step += 1) {
+    const dialog = page.locator('[role="dialog"]:visible').first();
+    if (!(await dialog.count())) break;
+    const dialogText = await dialog.innerText();
+    if (dialogText.includes('Internal Testing Notice')) {
+      await dialog.getByRole('button', { name: 'Continue' }).click();
+    } else if (dialogText.includes('Add an API key')) {
+      await dialog.getByRole('button', { name: 'Configure later' }).click();
+    } else {
+      break;
+    }
+    await dialog.waitFor({ state: 'detached', timeout: 10_000 }).catch(() => {});
+    await page.waitForTimeout(500);
+  }
+}
+
+/** Wait until the workspace shows the persisted-draft restored notice. */
+async function waitForRestored(page) {
+  await page.waitForSelector('[data-testid="dsh-feedback-notice"]', { timeout: 10_000 });
+  const text = (await page.textContent('[data-testid="dsh-feedback-notice"]')).trim();
+  assert.equal(text, 'Restored your in-progress draft');
+}
+
+/** Poll a path until it satisfies a predicate or the timeout expires. */
+async function waitForFile(path, predicate, { timeoutMs = 15_000, intervalMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
 test('packed bundle installs into a clean DSH Web profile and serves the status route', { skip: !hasDsh || !hasPnpm }, async () => {
   const tarball = JSON.parse(run('npm', ['pack', '--json'], { cwd: repoRoot }))[0].filename;
   const tarballPath = join(repoRoot, tarball);
@@ -199,25 +237,7 @@ test('browser click-through: left-nav 社区反馈 entry opens the workspace, ex
       page.on('websocket', (socket) => requests.push(socket.url()));
 
       await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
-
-      // A clean profile shows two sequential first-run modals — "Internal
-      // Testing Notice" then "Add an API key to get started" — that cover the
-      // sidebar. Dismiss each one so the left-nav entry is reachable.
-      await page.waitForSelector('[role="dialog"]', { timeout: 60_000 }).catch(() => {});
-      for (let step = 0; step < 6; step += 1) {
-        const dialog = page.locator('[role="dialog"]:visible').first();
-        if (!(await dialog.count())) break;
-        const dialogText = await dialog.innerText();
-        if (dialogText.includes('Internal Testing Notice')) {
-          await dialog.getByRole('button', { name: 'Continue' }).click();
-        } else if (dialogText.includes('Add an API key')) {
-          await dialog.getByRole('button', { name: 'Configure later' }).click();
-        } else {
-          break;
-        }
-        await dialog.waitFor({ state: 'detached', timeout: 10_000 }).catch(() => {});
-        await page.waitForTimeout(500);
-      }
+      await dismissFirstRunModals(page);
 
       // The left-navigation entry hydrates with the client app.
       await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
@@ -279,15 +299,19 @@ test('browser click-through: left-nav 社区反馈 entry opens the workspace, ex
       assert.equal(fileContent, expectedMarkdown);
       assert.equal(download.suggestedFilename(), 'dsh-community-feedback-draft.md');
 
-      // Closing keeps the draft in memory; reopening resumes it.
+      // Closing keeps the draft; reopening resumes it from the host.
       await page.click('[data-testid="dsh-feedback-close"]');
       await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { state: 'detached', timeout: 10_000 });
       await page.click('[data-testid="dsh-feedback-trigger"]');
       await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 10_000 });
+      await waitForRestored(page);
       assert.equal(await page.inputValue('[data-testid="dsh-feedback-title"]'), 'Add a plugin API to Harness');
 
-      // Cancelling discards the draft; reopening starts a blank session.
+      // Cancelling asks for a clear confirmation; confirming the discard
+      // removes the draft and reopening starts a blank session.
       await page.click('[data-testid="dsh-feedback-cancel"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-discard-confirm"]', { timeout: 10_000 });
+      await page.click('[data-testid="dsh-feedback-discard-confirm-action"]');
       await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { state: 'detached', timeout: 10_000 });
       await page.click('[data-testid="dsh-feedback-trigger"]');
       await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 10_000 });
@@ -307,6 +331,258 @@ test('browser click-through: left-nav 社区反馈 entry opens the workspace, ex
         child.kill('SIGTERM');
         await new Promise((resolveExit) => child.once('exit', resolveExit));
       }
+    }
+  } finally {
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+test('draft autosaves, survives a page reload, resumes, exports, and a confirmed discard removes it with zero external requests', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { existsSync } = await import('node:fs');
+  const tarball = JSON.parse(run('npm', ['pack', '--json'], { cwd: repoRoot }))[0].filename;
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-reload-'));
+  const draftPath = join(dshHome, 'dsh-feedback-bridge', 'draft.json');
+
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+
+    const child = spawn('dsh', ['--profile', 'web', '--no-open', '--port', '0'], {
+      cwd: repoRoot,
+      env: cleanEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    const port = await new Promise((resolvePort, reject) => {
+      let stdout = '';
+      const timeout = setTimeout(() => reject(new Error(`dsh web did not print a URL; stderr: ${stderr}`)), 30_000);
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+        const match = /http:\/\/127\.0\.0\.1:(\d+)/.exec(stdout);
+        if (match !== null) {
+          clearTimeout(timeout);
+          resolvePort(Number(match[1]));
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`dsh web exited before printing a URL (code ${code}); stderr: ${stderr}`));
+      });
+    });
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseUrl });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      const openWorkspace = async () => {
+        await page.click('[data-testid="dsh-feedback-trigger"]');
+        await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      };
+
+      // Fill the draft and wait for the debounced autosave to land on disk.
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await openWorkspace();
+      await page.fill('[data-testid="dsh-feedback-title"]', 'Resumable draft title');
+      await page.fill('[data-testid="dsh-feedback-scenario"]', 'A scenario written before the reload.');
+      await waitForFile(draftPath, () => existsSync(draftPath) && readFileSync(draftPath, 'utf8').includes('Resumable draft title'));
+
+      // Reload: the page must restore the persisted draft.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await openWorkspace();
+      await waitForRestored(page);
+      assert.equal(await page.inputValue('[data-testid="dsh-feedback-title"]'), 'Resumable draft title');
+      assert.equal(await page.inputValue('[data-testid="dsh-feedback-scenario"]'), 'A scenario written before the reload.');
+
+      // Continue editing after the resume, then copy and export the exact
+      // Markdown including the resumed content.
+      await page.fill('[data-testid="dsh-feedback-gap"]', 'A gap added after the resume.');
+      await page.fill('[data-testid="dsh-feedback-desired"]', 'Desired result after the resume.');
+      const expectedMarkdown = [
+        '# Resumable draft title',
+        '',
+        '## Scenario',
+        '',
+        'A scenario written before the reload.',
+        '',
+        '## The problem or situation you encountered',
+        '',
+        'A gap added after the resume.',
+        '',
+        '## Desired result',
+        '',
+        'Desired result after the resume.',
+      ].join('\n');
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-preview"]')).trim(), expectedMarkdown);
+
+      await page.click('[data-testid="dsh-feedback-copy"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-notice"]', { timeout: 10_000 });
+      assert.equal((await page.evaluate(() => navigator.clipboard.readText())), expectedMarkdown);
+
+      const downloadPromise = page.waitForEvent('download');
+      await page.click('[data-testid="dsh-feedback-export"]');
+      const download = await downloadPromise;
+      assert.equal(readFileSync(await download.path(), 'utf8'), expectedMarkdown);
+      assert.equal(download.suggestedFilename(), 'dsh-community-feedback-draft.md');
+
+      // Closing keeps the draft; reopening resumes it from the host.
+      await page.click('[data-testid="dsh-feedback-close"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { state: 'detached', timeout: 10_000 });
+      await openWorkspace();
+      await waitForRestored(page);
+      assert.equal(await page.inputValue('[data-testid="dsh-feedback-title"]'), 'Resumable draft title');
+
+      // Cancel shows the explicit confirmation; "Keep editing" changes nothing.
+      await page.click('[data-testid="dsh-feedback-cancel"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-discard-confirm"]', { timeout: 10_000 });
+      await page.click('[data-testid="dsh-feedback-discard-keep"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-discard-confirm"]', { state: 'detached', timeout: 10_000 });
+      assert.equal(await page.inputValue('[data-testid="dsh-feedback-title"]'), 'Resumable draft title');
+
+      // Confirming the discard removes the draft file and the workspace closes.
+      await page.click('[data-testid="dsh-feedback-cancel"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-discard-confirm"]', { timeout: 10_000 });
+      await page.click('[data-testid="dsh-feedback-discard-confirm-action"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { state: 'detached', timeout: 10_000 });
+      await waitForFile(draftPath, () => !existsSync(draftPath));
+
+      // A late autosave must not resurrect the discarded draft.
+      await page.waitForTimeout(1500);
+      assert.equal(existsSync(draftPath), false, 'a discarded draft must stay removed');
+
+      // Reopening starts a blank session.
+      await openWorkspace();
+      assert.equal(await page.inputValue('[data-testid="dsh-feedback-title"]'), '');
+
+      await browser.close();
+
+      const external = requests.filter((url) => {
+        const host = new URL(url).hostname;
+        return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]';
+      });
+      assert.deepEqual(external, [], `unexpected external requests: ${external.join(', ')}`);
+      assert.ok(!requests.some((url) => /github\.com/i.test(url)), 'a GitHub request was observed during the feedback flow');
+    } finally {
+      if (child.exitCode === null) {
+        child.kill('SIGTERM');
+        await new Promise((resolveExit) => child.once('exit', resolveExit));
+      }
+    }
+  } finally {
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
+test('draft survives a DSH restart with the same DSH_HOME on a different port', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { existsSync } = await import('node:fs');
+  const tarball = JSON.parse(run('npm', ['pack', '--json'], { cwd: repoRoot }))[0].filename;
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-restart-'));
+  const draftPath = join(dshHome, 'dsh-feedback-bridge', 'draft.json');
+
+  async function boot() {
+    const child = spawn('dsh', ['--profile', 'web', '--no-open', '--port', '0'], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    const port = await new Promise((resolvePort, reject) => {
+      let stdout = '';
+      const timeout = setTimeout(() => reject(new Error(`dsh web did not print a URL; stderr: ${stderr}`)), 30_000);
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+        const match = /http:\/\/127\.0\.0\.1:(\d+)/.exec(stdout);
+        if (match !== null) {
+          clearTimeout(timeout);
+          resolvePort(Number(match[1]));
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`dsh web exited before printing a URL (code ${code}); stderr: ${stderr}`));
+      });
+    });
+    return { child, port };
+  }
+
+  async function stop(child) {
+    if (child.exitCode === null) {
+      child.kill('SIGTERM');
+      await new Promise((resolveExit) => child.once('exit', resolveExit));
+    }
+  }
+
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+
+    // First boot: write a draft and wait for the autosave to land.
+    const first = await boot();
+    const firstUrl = `http://127.0.0.1:${first.port}`;
+    const browser = await chromium.launch({ headless: true });
+    const firstContext = await browser.newContext({ acceptDownloads: true });
+    const firstPage = await firstContext.newPage();
+    try {
+      await firstPage.goto(firstUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(firstPage);
+      await firstPage.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await firstPage.click('[data-testid="dsh-feedback-trigger"]');
+      await firstPage.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await firstPage.fill('[data-testid="dsh-feedback-title"]', 'Survives a restart');
+      await firstPage.fill('[data-testid="dsh-feedback-scenario"]', 'This draft must come back after DSH restarts.');
+      await waitForFile(draftPath, () => existsSync(draftPath) && readFileSync(draftPath, 'utf8').includes('Survives a restart'));
+    } finally {
+      await browser.close();
+      await stop(first.child);
+    }
+
+    // Second boot with the same DSH_HOME picks a different port and restores
+    // the draft.
+    const second = await boot();
+    const secondUrl = `http://127.0.0.1:${second.port}`;
+    assert.notEqual(second.port, first.port);
+    const secondBrowser = await chromium.launch({ headless: true });
+    const secondContext = await secondBrowser.newContext({ acceptDownloads: true });
+    const secondPage = await secondContext.newPage();
+    try {
+      await secondPage.goto(secondUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(secondPage);
+      await secondPage.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await secondPage.click('[data-testid="dsh-feedback-trigger"]');
+      await secondPage.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await waitForRestored(secondPage);
+      assert.equal(await secondPage.inputValue('[data-testid="dsh-feedback-title"]'), 'Survives a restart');
+      assert.equal(await secondPage.inputValue('[data-testid="dsh-feedback-scenario"]'), 'This draft must come back after DSH restarts.');
+    } finally {
+      await secondBrowser.close();
+      await stop(second.child);
     }
   } finally {
     rmSync(dshHome, { recursive: true, force: true });
