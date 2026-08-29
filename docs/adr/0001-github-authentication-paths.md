@@ -1,0 +1,3 @@
+# Use GUI OAuth with optional GitHub CLI authentication
+
+v0.1 will use GitHub OAuth authorization-code flow with PKCE as the primary path for novice users and may reuse an explicitly selected `gh auth` account as an advanced-user path. Tokens remain on the Host, OAuth grants use the DSH credentials service, and the UI must disclose that the current local credentials provider is not an operating-system security boundary and provide disconnect and draft-export fallbacks. PAT entry, device flow, and browser-held tokens are not primary authentication paths because they respectively widen permissions, increase impersonation risk, or expose secrets to the Client.
