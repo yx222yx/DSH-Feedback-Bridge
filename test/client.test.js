@@ -99,7 +99,7 @@ test('client bundle registers with the DSH Web module loader under the package i
   assert.equal(typeof registration.factory, 'function');
 });
 
-test('client plugin declares locale and slots dependencies and registers localized settings section', () => {
+test('client plugin declares locale and slots dependencies and registers the settings section and left-nav entry', () => {
   const moduleExports = loadClientExports();
   const ctx = {
     locale: createFakeLocale('en'),
@@ -117,26 +117,49 @@ test('client plugin declares locale and slots dependencies and registers localiz
 
   moduleExports.apply(ctx);
 
-  assert.equal(ctx.slots.state.injected.length, 1);
-  assert.equal(ctx.slots.state.injected[0], 'settings.section');
-  assert.equal(ctx.slots.state.registrations.size, 1);
+  assert.equal(ctx.slots.state.injected.length, 2);
+  assert.ok(ctx.slots.state.injected.includes('settings.section'));
+  assert.ok(ctx.slots.state.injected.includes('sidebar.footer.action'));
+  assert.equal(ctx.slots.state.registrations.size, 2);
   assert.ok(ctx.locale.dictionaries.has('dsh-feedback-bridge'));
-  assert.ok(ctx.locale.dictionaries.get('dsh-feedback-bridge').en.nav);
-  assert.ok(ctx.locale.dictionaries.get('dsh-feedback-bridge').zh.nav);
 
-  const [record] = ctx.slots.state.registrations;
-  assert.deepEqual(record.meta, {
-    name: 'settings.section',
-    id: 'dsh-feedback-bridge',
-    order: 90,
-    label: record.meta.label,
-  });
-  assert.equal(record.meta.label(), 'DSH Feedback Bridge');
+  const settings = [...ctx.slots.state.registrations].find((record) => record.meta.name === 'settings.section');
+  const footer = [...ctx.slots.state.registrations].find((record) => record.meta.name === 'sidebar.footer.action');
+  assert.ok(settings);
+  assert.ok(footer);
 
-  const vnode = record.component({});
-  assert.equal(vnode.type.name, 'StatusSection');
-  const statusSection = vnode.type(vnode.props);
+  // The settings page keeps the recognizable plugin-status label (product name).
+  assert.equal(settings.meta.label(), 'DSH Feedback Bridge');
+  const statusVnode = settings.component({});
+  assert.equal(statusVnode.type.name, 'StatusSection');
+  const statusSection = statusVnode.type(statusVnode.props);
   assert.equal(statusSection.props['data-testid'], 'dsh-feedback-bridge-status');
+
+  // The left-navigation entry lives in the sidebar footer-action list slot.
+  assert.equal(footer.meta.id, 'dsh-feedback-bridge');
+  assert.equal(footer.meta.locale, 'dsh-feedback-bridge');
+  const triggerVnode = footer.component({ wide: true });
+  assert.equal(triggerVnode.type.name, 'FeedbackTrigger');
+});
+
+test('the left-navigation label is pure Chinese 社区反馈 in every locale', () => {
+  const moduleExports = loadClientExports();
+  const ctx = {
+    locale: createFakeLocale('zh'),
+    slots: createFakeSlots(),
+    effect(callback) {
+      const dispose = callback();
+      return () => {
+        if (typeof dispose === 'function') dispose();
+      };
+    },
+  };
+  moduleExports.apply(ctx);
+  const en = ctx.locale.dictionaries.get('dsh-feedback-bridge').en;
+  const zh = ctx.locale.dictionaries.get('dsh-feedback-bridge').zh;
+  assert.equal(en.nav, '社区反馈');
+  assert.equal(zh.nav, '社区反馈');
+  assert.doesNotMatch(en.nav, /[A-Za-z]/);
 });
 
 test('client slot registration is disposed when the owning fiber unloads', async () => {
@@ -154,8 +177,8 @@ test('client slot registration is disposed when the owning fiber unloads', async
   const fiber = root.plugin(moduleExports);
   await fiber;
 
-  assert.equal(slots.state.injected.length, 1);
-  assert.equal(slots.state.registrations.size, 1);
+  assert.equal(slots.state.injected.length, 2);
+  assert.equal(slots.state.registrations.size, 2);
   assert.ok(locale.dictionaries.has('dsh-feedback-bridge'));
 
   await fiber.dispose();

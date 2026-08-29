@@ -11,6 +11,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
         version: 4.0.1
+      playwright-core:
+        specifier: 1.62.1
+        version: 1.62.1
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -38,6 +41,11 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
+    hasBin: true
+
   react-dom@19.2.8:
     resolution: {integrity: sha512-rVprimfGBG3DR+Tq0IQG2DT5PxKth1WIGDmj5yPmlzr4YBe7uyE+Du4oVqTDXZSHGGGXRtTJEGSSePyQCMBglQ==}
     peerDependencies:
@@ -60,6 +68,8 @@ snapshots:
   '@deepseek-ai/cosmokit@1.8.2': {}
 
   '@standard-schema/spec@1.1.0': {}
+
+  playwright-core@1.62.1: {}
 
   react-dom@19.2.8(react@19.2.8):
     dependencies:
