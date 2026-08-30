@@ -184,17 +184,18 @@ export type FeedbackBridgeKey =
   | 'submission.guidance.reauth'
   | 'submission.guidance.scopes'
   | 'oauth.signIn'
-  | 'oauth.starting'
   | 'oauth.waiting'
   | 'oauth.open'
+  | 'oauth.enterCode'
+  | 'oauth.copyCode'
   | 'oauth.cancel'
   | 'oauth.disconnect'
   | 'oauth.retry'
   | 'oauth.disclosure'
   | 'oauth.failed.denied'
-  | 'oauth.failed.state-expired'
+  | 'oauth.failed.expired'
+  | 'oauth.failed.insufficient-scope'
   | 'oauth.failed.exchange-failed'
-  | 'oauth.failed.user-failed'
   | 'oauth.failed.network';
 
 /** Namespace-bound translate function delivered by the locale service. */

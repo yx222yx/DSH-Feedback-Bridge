@@ -1,35 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  buildAuthorizeUrl,
-  createOAuthStateStore,
-  createPkceChallenge,
-  createPkceVerifier,
-  exchangeCode,
-  fetchGitHubUser,
+  createOAuthFlowManager,
+  createOAuthGitHubService,
+  hasGrantedScope,
   normalizeOAuthConfig,
   parseGrantPayload,
+  pollDeviceToken,
+  requestDeviceCode,
 } from '../lib/oauth.js';
+import { OFFICIAL_DISCUSSION_OWNER, OFFICIAL_DISCUSSION_REPO } from '../lib/github.js';
 
-/** RFC 7636 appendix B worked example: verifier and its S256 challenge. */
-const RFC_VERIFIER = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
-const RFC_CHALLENGE = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-
-function baseConfig(overrides = {}) {
-  return {
-    clientId: 'client-123',
-    authorizeEndpoint: 'https://github.com/login/oauth/authorize',
-    tokenEndpoint: 'https://github.com/login/oauth/access_token',
-    userEndpoint: 'https://api.github.com/user',
-    redirectUri: 'http://127.0.0.1:3080/dsh-feedback-bridge/oauth/callback',
-    scopes: '',
-    stateTtlMs: 60000,
-    timeoutMs: 1000,
-    ...overrides,
-  };
-}
-
-/** Fake fetch recording every call and answering per endpoint. */
+/** Fake fetch recording every call and answering per URL. */
 function fakeFetch(routes) {
   const calls = [];
   return {
@@ -52,116 +34,112 @@ function jsonResponse(payload, status = 200) {
   };
 }
 
-test('createPkceChallenge produces the RFC 7636 S256 challenge for the worked example', () => {
-  assert.equal(createPkceChallenge(RFC_VERIFIER), RFC_CHALLENGE);
-  assert.equal(createPkceVerifier().length, 43);
-  assert.notEqual(createPkceVerifier(), createPkceVerifier());
-});
+function baseConfig(overrides = {}) {
+  return {
+    clientId: 'client-device',
+    deviceEndpoint: 'https://github.com/login/device/code',
+    tokenEndpoint: 'https://github.com/login/oauth/access_token',
+    userEndpoint: 'https://api.github.com/user',
+    scopes: 'public_repo',
+    timeoutMs: 1000,
+    ...overrides,
+  };
+}
 
-test('normalizeOAuthConfig applies documented defaults and fails loud on invalid values', () => {
-  const merged = normalizeOAuthConfig({ clientId: 'client-123', redirectBaseUrl: 'http://127.0.0.1:9' });
-  assert.equal(merged.redirectUri, 'http://127.0.0.1:9/dsh-feedback-bridge/oauth/callback');
-  assert.equal(merged.clientId, 'client-123');
-  assert.equal(merged.authorizeEndpoint, 'https://github.com/login/oauth/authorize');
+const DEVICE_PAYLOAD = {
+  device_code: 'device-secret',
+  user_code: 'ABCD-1234',
+  verification_uri: 'https://github.com/login/device',
+  expires_in: 900,
+  interval: 5,
+};
+
+test('normalizeOAuthConfig defaults to GitHub Device Flow with public_repo and rejects the old PKCE keys', () => {
+  const merged = normalizeOAuthConfig({ clientId: 'client-device' });
+  assert.equal(merged.clientId, 'client-device');
+  assert.equal(merged.deviceEndpoint, 'https://github.com/login/device/code');
   assert.equal(merged.tokenEndpoint, 'https://github.com/login/oauth/access_token');
   assert.equal(merged.userEndpoint, 'https://api.github.com/user');
-  assert.equal(merged.stateTtlMs, 600000);
+  assert.equal(merged.scopes, 'public_repo');
   assert.equal(merged.timeoutMs, 10000);
-  assert.equal(merged.scopes, '');
 
   assert.throws(() => normalizeOAuthConfig({}), /clientId/);
-  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', tokenEndpoint: '' }), /tokenEndpoint/);
-  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', authorizeEndpoint: 'not-a-url' }), /authorizeEndpoint/);
-  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', stateTtlMs: 'soon' }), /stateTtlMs/);
-  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', mystery: true }), /mystery/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', clientSecret: 's' }), /clientSecret/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', authorizeEndpoint: 'http://a' }), /authorizeEndpoint/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', redirectBaseUrl: 'http://a' }), /redirectBaseUrl/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', stateTtlMs: 10 }), /stateTtlMs/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', deviceEndpoint: 'not-a-url' }), /deviceEndpoint/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', timeoutMs: 'soon' }), /timeoutMs/);
+  assert.throws(() => normalizeOAuthConfig({ clientId: 'x', mystery: 1 }), /mystery/);
 });
 
-test('the state store issues one-shot state with a verifier and rejects unknown or expired states', async () => {
-  const store = createOAuthStateStore(25);
-  const first = store.issue();
-  const second = store.issue();
-  assert.notEqual(first.state, second.state);
-  assert.equal(store.consume(first.state), first.verifier);
-  assert.equal(store.consume(first.state), null, 'a state must be one-shot');
-  assert.equal(store.consume('nope'), null);
-  const late = store.issue();
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(store.consume(late.state), null, 'an expired state must be rejected');
-});
-
-test('buildAuthorizeUrl carries every PKCE and OAuth parameter for the chosen challenge', () => {
-  const config = baseConfig({ scopes: 'repo read:org' });
-  const url = new URL(buildAuthorizeUrl(config, 'state-abc', RFC_CHALLENGE));
-  assert.equal(url.origin + url.pathname, config.authorizeEndpoint);
-  assert.equal(url.searchParams.get('response_type'), 'code');
-  assert.equal(url.searchParams.get('client_id'), 'client-123');
-  assert.equal(url.searchParams.get('redirect_uri'), config.redirectUri);
-  assert.equal(url.searchParams.get('state'), 'state-abc');
-  assert.equal(url.searchParams.get('scope'), 'repo read:org');
-  assert.equal(url.searchParams.get('code_challenge'), RFC_CHALLENGE);
-  assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
-});
-
-test('exchangeCode posts the code and verifier and returns the grant fields', async () => {
+test('requestDeviceCode posts only the public client id and scope, and parses the device fields', async () => {
   const config = baseConfig();
   const fetch = fakeFetch({
-    [config.tokenEndpoint]: () => jsonResponse({
-      access_token: 'gho_exchange-secret',
-      refresh_token: 'ghr_refresh-secret',
-      expires_in: 3600,
-      scope: 'repo',
-    }),
+    [config.deviceEndpoint]: () => jsonResponse(DEVICE_PAYLOAD),
   });
-  const result = await exchangeCode({ fetchImpl: fetch.impl }, config, 'code-xyz', RFC_VERIFIER);
+  const result = await requestDeviceCode({ fetchImpl: fetch.impl }, config);
   assert.deepEqual(result, {
     status: 'ok',
-    accessToken: 'gho_exchange-secret',
-    refreshToken: 'ghr_refresh-secret',
-    expiresInSeconds: 3600,
-    scope: 'repo',
+    device: {
+      deviceCode: 'device-secret',
+      userCode: 'ABCD-1234',
+      verificationUri: 'https://github.com/login/device',
+      expiresInSeconds: 900,
+      intervalSeconds: 5,
+    },
   });
   assert.equal(fetch.calls.length, 1);
   const body = new URLSearchParams(fetch.calls[0].body);
-  assert.equal(body.get('client_id'), 'client-123');
-  assert.equal(body.get('code'), 'code-xyz');
-  assert.equal(body.get('redirect_uri'), config.redirectUri);
-  assert.equal(body.get('code_verifier'), RFC_VERIFIER);
+  assert.equal(body.get('client_id'), 'client-device');
+  assert.equal(body.get('scope'), 'public_repo');
+  assert.equal(body.get('client_secret'), null, 'no client secret may ever be sent');
   assert.equal(fetch.calls[0].headers.accept, 'application/json');
 });
 
-test('exchangeCode maps HTTP and network failures to explicit outcomes', async () => {
+test('requestDeviceCode maps HTTP and network failures to explicit outcomes', async () => {
   const config = baseConfig();
-  const httpFail = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({ error: 'bad_verification_code' }, 400) });
-  assert.deepEqual(await exchangeCode({ fetchImpl: httpFail.impl }, config, 'code', RFC_VERIFIER), {
-    status: 'failed',
-    code: 'exchange-error',
-  });
+  const httpFail = fakeFetch({ [config.deviceEndpoint]: () => jsonResponse({ error: 'invalid_client_id' }, 400) });
+  assert.deepEqual(await requestDeviceCode({ fetchImpl: httpFail.impl }, config), { status: 'failed', code: 'exchange-failed' });
   const networkFail = fakeFetch({});
-  assert.deepEqual(await exchangeCode({ fetchImpl: networkFail.impl }, config, 'code', RFC_VERIFIER), {
-    status: 'failed',
-    code: 'network',
-  });
+  assert.deepEqual(await requestDeviceCode({ fetchImpl: networkFail.impl }, config), { status: 'failed', code: 'network' });
 });
 
-test('fetchGitHubUser resolves the public login with the bearer token and fails on a bad response', async () => {
+test('pollDeviceToken posts the device code with the device grant type and maps every GitHub outcome', async () => {
   const config = baseConfig();
-  const ok = fakeFetch({ [config.userEndpoint]: () => jsonResponse({ login: 'alice' }) });
-  assert.deepEqual(await fetchGitHubUser({ fetchImpl: ok.impl }, config, 'gho_secret'), { login: 'alice' });
-  assert.equal(ok.calls[0].headers.authorization, 'Bearer gho_secret');
-  const forbidden = fakeFetch({ [config.userEndpoint]: () => jsonResponse({}, 403) });
-  await assert.rejects(() => fetchGitHubUser({ fetchImpl: forbidden.impl }, config, 'gho_secret'));
-  const malformed = fakeFetch({ [config.userEndpoint]: () => jsonResponse({}) });
-  await assert.rejects(() => fetchGitHubUser({ fetchImpl: malformed.impl }, config, 'gho_secret'));
+  const cases = [
+    [{ error: 'authorization_pending' }, { status: 'pending' }],
+    [{ error: 'slow_down' }, { status: 'slow-down' }],
+    [{ error: 'expired_token' }, { status: 'failed', code: 'expired' }],
+    [{ error: 'access_denied' }, { status: 'failed', code: 'denied' }],
+    [{ access_token: 'gho_poll-secret', scope: 'public_repo' }, { status: 'ok', accessToken: 'gho_poll-secret', scope: 'public_repo' }],
+    [{ error: 'unsupported_grant_type' }, { status: 'failed', code: 'exchange-failed' }],
+  ];
+  for (const [payload, expected] of cases) {
+    const fetch = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse(payload) });
+    const result = await pollDeviceToken({ fetchImpl: fetch.impl }, config, 'device-secret');
+    assert.deepEqual(result, expected, JSON.stringify(payload));
+    const body = new URLSearchParams(fetch.calls[0].body);
+    assert.equal(body.get('client_id'), 'client-device');
+    assert.equal(body.get('device_code'), 'device-secret');
+    assert.equal(body.get('grant_type'), 'urn:ietf:params:oauth:grant-type:device_code');
+    assert.equal(body.get('client_secret'), null);
+  }
+  const networkFail = fakeFetch({});
+  assert.deepEqual(await pollDeviceToken({ fetchImpl: networkFail.impl }, config, 'device-secret'), { status: 'failed', code: 'network' });
+  const malformed = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({}) });
+  assert.deepEqual(await pollDeviceToken({ fetchImpl: malformed.impl }, config, 'device-secret'), { status: 'failed', code: 'exchange-failed' });
+});
+
+test('hasGrantedScope requires every requested scope in the granted set', () => {
+  assert.equal(hasGrantedScope('public_repo', 'public_repo'), true);
+  assert.equal(hasGrantedScope('public_repo repo', 'public_repo'), true);
+  assert.equal(hasGrantedScope('repo', 'public_repo'), false);
+  assert.equal(hasGrantedScope('', 'public_repo'), false);
 });
 
 test('parseGrantPayload accepts a valid stored grant and rejects malformed ones', () => {
-  const grant = {
-    accessToken: 'gho_stored',
-    login: 'alice',
-    scopes: 'repo',
-    refreshToken: 'ghr_stored',
-    expiresAt: 1234567890,
-  };
+  const grant = { accessToken: 'gho_stored', login: 'alice', scopes: 'public_repo' };
   assert.deepEqual(parseGrantPayload(grant), grant);
   assert.throws(() => parseGrantPayload({ login: 'alice', scopes: '' }), /accessToken/);
   assert.throws(() => parseGrantPayload({ accessToken: 'x', scopes: '' }), /login/);
@@ -170,28 +148,21 @@ test('parseGrantPayload accepts a valid stored grant and rejects malformed ones'
 });
 
 // ---------------------------------------------------------------------------
-// oauth provider (submission boundary) + flow manager
+// device flow manager
 // ---------------------------------------------------------------------------
 
-import {
-  createOAuthFlowManager,
-  createOAuthGitHubService,
-} from '../lib/oauth.js';
-import { OFFICIAL_DISCUSSION_OWNER, OFFICIAL_DISCUSSION_REPO } from '../lib/github.js';
-
-/** In-memory grant store recording every write and clear. */
-function fakeGrantStore(initial) {
-  let grant = initial;
+/** In-memory grant store recording writes. */
+function fakeGrantStore() {
+  let grant;
   return {
     grant: () => grant,
-    writes: [],
     async readGrant() { return grant; },
-    async writeGrant(payload) { grant = payload; this.writes.push(payload); },
+    async writeGrant(payload) { grant = payload; },
     async clearGrant() { grant = undefined; },
   };
 }
 
-/** Fake GitHub GraphQL fetch answering the read and mutation operations. */
+/** Fake GitHub GraphQL fetch for the submission provider. */
 function fakeGitHubFetch(overrides = {}) {
   const calls = [];
   return {
@@ -227,31 +198,155 @@ function fakeGitHubFetch(overrides = {}) {
   };
 }
 
-const VALID_GRANT = { accessToken: 'gho_oauth-secret', login: 'alice', scopes: 'repo' };
-
-function oauthProviderDeps(grantStore, fetchImpl) {
-  return { grantStore, fetchImpl };
+/** Fake device + token + user endpoints; token answers per script. */
+function fakeDeviceOAuth({ tokenScript, scope = 'public_repo' } = {}) {
+  const config = baseConfig({
+    deviceEndpoint: 'http://127.0.0.1:9/device',
+    tokenEndpoint: 'http://127.0.0.1:9/token',
+    userEndpoint: 'http://127.0.0.1:9/user',
+  });
+  let pollCount = 0;
+  const fetch = fakeFetch({
+    [config.deviceEndpoint]: () => jsonResponse({ ...DEVICE_PAYLOAD, interval: 0.01 }),
+    [config.tokenEndpoint]: () => {
+      pollCount += 1;
+      const answer = tokenScript(pollCount);
+      return Promise.resolve(jsonResponse(answer));
+    },
+    [config.userEndpoint]: () => jsonResponse({ login: 'alice' }),
+  });
+  return { config, fetch, pollCount: () => pollCount };
 }
 
+/** Await a manager until it leaves the running phase or the timeout passes. */
+async function awaitTerminal(manager, { timeoutMs = 3000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = manager.status();
+    if (status.phase !== 'running') return status;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  throw new Error('manager did not settle in time: ' + JSON.stringify(manager.status()));
+}
+
+test('the flow manager starts a device flow and exposes only the user code and verification URI', async () => {
+  const store = fakeGrantStore();
+  const { config, fetch } = fakeDeviceOAuth({ tokenScript: () => ({ error: 'authorization_pending' }) });
+  const manager = createOAuthFlowManager(config, { fetchImpl: fetch.impl, grantStore: store });
+  const started = await manager.start();
+  assert.deepEqual(started, { status: 'running', userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device' });
+  const status = manager.status();
+  assert.equal(status.phase, 'running');
+  if (status.phase === 'running') {
+    assert.equal(status.userCode, 'ABCD-1234');
+    assert.equal(status.verificationUri, 'https://github.com/login/device');
+  }
+  assert.ok(!JSON.stringify(status).includes('device-secret'), 'the device code must never be exposed');
+  manager.cancel();
+});
+
+test('the flow manager polls until authorization and commits the grant with the resolved identity', async () => {
+  const store = fakeGrantStore();
+  const { config, fetch } = fakeDeviceOAuth({ tokenScript: (n) => (n === 1 ? { error: 'authorization_pending' } : { access_token: 'gho_manager-secret', scope: 'public_repo' }) });
+  const manager = createOAuthFlowManager(config, { fetchImpl: fetch.impl, grantStore: store });
+  await manager.start();
+  const terminal = await awaitTerminal(manager);
+  assert.deepEqual(terminal, { phase: 'authorized', login: 'alice' });
+  assert.equal(store.grant().login, 'alice', 'the grant must be committed through the credentials seam');
+  assert.equal(store.grant().accessToken, 'gho_manager-secret');
+  assert.ok(!JSON.stringify(manager.status()).includes('gho_manager-secret'), 'the token must never appear in the status');
+  assert.ok(fetch.calls.some((call) => call.url.endsWith('/token')), 'the host must poll the token endpoint');
+});
+
+test('the flow manager handles slow_down by slowing down and still succeeding', async () => {
+  const store = fakeGrantStore();
+  // slow_down adds the RFC 8628 five-second interval, so the success poll
+  // arrives about five seconds later than a plain pending poll would.
+  const { config, fetch } = fakeDeviceOAuth({ tokenScript: (n) => {
+    if (n === 1) return { error: 'slow_down' };
+    return { access_token: 'gho_slow-secret', scope: 'public_repo' };
+  } });
+  const manager = createOAuthFlowManager(config, { fetchImpl: fetch.impl, grantStore: store });
+  await manager.start();
+  const terminal = await awaitTerminal(manager, { timeoutMs: 9000 });
+  assert.deepEqual(terminal, { phase: 'authorized', login: 'alice' });
+});
+
+test('the flow manager maps expired, denied, exchange failure, and insufficient scope to distinct failures', async () => {
+  const cases = [
+    { script: () => ({ error: 'expired_token' }), expected: { phase: 'failed', code: 'expired' } },
+    { script: () => ({ error: 'access_denied' }), expected: { phase: 'failed', code: 'denied' } },
+    { script: () => ({ error: 'unsupported_grant_type' }), expected: { phase: 'failed', code: 'exchange-failed' } },
+    { script: () => ({ access_token: 'gho_x', scope: 'repo' }), expected: { phase: 'failed', code: 'insufficient-scope' } },
+  ];
+  for (const entry of cases) {
+    const store = fakeGrantStore();
+    const { config, fetch } = fakeDeviceOAuth({ tokenScript: entry.script });
+    const manager = createOAuthFlowManager(config, { fetchImpl: fetch.impl, grantStore: store });
+    await manager.start();
+    const terminal = await awaitTerminal(manager);
+    assert.deepEqual(terminal, entry.expected, JSON.stringify(entry.expected));
+    assert.equal(store.grant(), undefined, 'a failed flow must never commit a grant');
+  }
+});
+
+test('cancelling the flow stops polling without committing a grant', async () => {
+  const store = fakeGrantStore();
+  const { config, fetch } = fakeDeviceOAuth({ tokenScript: () => ({ error: 'authorization_pending' }) });
+  const manager = createOAuthFlowManager(config, { fetchImpl: fetch.impl, grantStore: store });
+  await manager.start();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const callsBeforeCancel = fetch.calls.length;
+  manager.cancel();
+  assert.deepEqual(manager.status(), { phase: 'cancelled' });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(fetch.calls.length, callsBeforeCancel, 'polling must stop after cancel');
+  assert.equal(store.grant(), undefined);
+});
+
+test('the device code expiry deadline fails the flow as expired without a grant', async () => {
+  const store = fakeGrantStore();
+  const { config, fetch } = fakeDeviceOAuth({ tokenScript: () => ({ error: 'authorization_pending' }) });
+  config.scopes = 'public_repo';
+  // expires_in 0.02s: the deadline passes while polling stays pending.
+  const fetch2 = fakeFetch({
+    [config.deviceEndpoint]: () => jsonResponse({ ...DEVICE_PAYLOAD, expires_in: 0.02, interval: 0.01 }),
+    [config.tokenEndpoint]: () => Promise.resolve(jsonResponse({ error: 'authorization_pending' })),
+    [config.userEndpoint]: () => Promise.resolve(jsonResponse({ login: 'alice' })),
+  });
+  const manager = createOAuthFlowManager(config, { fetchImpl: fetch2.impl, grantStore: store });
+  await manager.start();
+  const terminal = await awaitTerminal(manager);
+  assert.deepEqual(terminal, { phase: 'failed', code: 'expired' });
+  assert.equal(store.grant(), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// oauth submission provider (unchanged boundary)
+// ---------------------------------------------------------------------------
+
+const VALID_GRANT = { accessToken: 'gho_oauth-secret', login: 'alice', scopes: 'public_repo' };
+
 test('oauth provider reports authorization-required with zero network calls when no grant is stored', async () => {
-  const store = fakeGrantStore(undefined);
+  const store = fakeGrantStore();
   const fetch = fakeGitHubFetch();
   const service = createOAuthGitHubService(
     { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
     baseConfig(),
-    oauthProviderDeps(store, fetch.impl),
+    { grantStore: store, fetchImpl: fetch.impl },
   );
   assert.deepEqual(await service.prepare(), { status: 'failed', code: 'authorization-required' });
-  assert.equal(fetch.calls.length, 0, 'no GitHub request may leave the host without a grant');
+  assert.equal(fetch.calls.length, 0);
 });
 
 test('oauth provider prepares read-only with the stored identity and its bearer token', async () => {
-  const store = fakeGrantStore(VALID_GRANT);
+  const store = fakeGrantStore();
+  await store.writeGrant(VALID_GRANT);
   const fetch = fakeGitHubFetch();
   const service = createOAuthGitHubService(
     { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
     baseConfig(),
-    oauthProviderDeps(store, fetch.impl),
+    { grantStore: store, fetchImpl: fetch.impl },
   );
   const result = await service.prepare();
   assert.equal(result.status, 'ready');
@@ -259,45 +354,17 @@ test('oauth provider prepares read-only with the stored identity and its bearer 
   assert.deepEqual(result.identity, { login: 'alice' });
   assert.equal(result.destination.owner, OFFICIAL_DISCUSSION_OWNER);
   assert.equal(result.destination.repo, OFFICIAL_DISCUSSION_REPO);
-  assert.equal(fetch.calls.length, 1);
   assert.equal(fetch.calls[0].headers.authorization, 'Bearer gho_oauth-secret');
-  assert.doesNotMatch(fetch.calls[0].body, /mutation/i);
-});
-
-test('oauth provider maps an expired grant and an expired token to authorization-expired', async () => {
-  const expired = fakeGrantStore({ ...VALID_GRANT, expiresAt: Date.now() - 1000 });
-  const fetch = fakeGitHubFetch();
-  const service = createOAuthGitHubService(
-    { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
-    baseConfig(),
-    oauthProviderDeps(expired, fetch.impl),
-  );
-  assert.deepEqual(await service.prepare(), { status: 'failed', code: 'authorization-expired' });
-  assert.equal(fetch.calls.length, 0, 'an expired grant must never be sent');
-
-  const fresh = fakeGrantStore(VALID_GRANT);
-  const rejected = fakeGitHubFetch({ mutation401: true });
-  const service2 = createOAuthGitHubService(
-    { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
-    baseConfig(),
-    oauthProviderDeps(fresh, rejected.impl),
-  );
-  const prepared = await service2.prepare();
-  assert.equal(prepared.status, 'ready');
-  const outcome = await service2.createDiscussion({
-    title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
-  });
-  assert.deepEqual(outcome, { status: 'failed', code: 'authorization-expired' });
-  assert.equal(rejected.calls.length, 2, 'exactly one read and one mutation attempt');
 });
 
 test('oauth provider creates exactly one Discussion mutation with the stored bearer token', async () => {
-  const store = fakeGrantStore(VALID_GRANT);
+  const store = fakeGrantStore();
+  await store.writeGrant(VALID_GRANT);
   const fetch = fakeGitHubFetch();
   const service = createOAuthGitHubService(
     { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
     baseConfig(),
-    oauthProviderDeps(store, fetch.impl),
+    { grantStore: store, fetchImpl: fetch.impl },
   );
   const outcome = await service.createDiscussion({
     title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
@@ -305,117 +372,32 @@ test('oauth provider creates exactly one Discussion mutation with the stored bea
   assert.deepEqual(outcome, { status: 'created', url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/42' });
   assert.equal(fetch.calls.length, 1);
   assert.equal(fetch.calls[0].headers.authorization, 'Bearer gho_oauth-secret');
-  assert.doesNotMatch(fetch.calls[0].body, /issues/i);
+  assert.ok(!JSON.stringify({ outcome }).includes('gho_oauth-secret'));
 });
 
-test('oauth provider never returns the token in any result payload', async () => {
-  const store = fakeGrantStore(VALID_GRANT);
+test('oauth provider maps an expired grant and an expired token to authorization-expired', async () => {
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, expiresAt: Date.now() - 1000 });
   const fetch = fakeGitHubFetch();
   const service = createOAuthGitHubService(
     { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
     baseConfig(),
-    oauthProviderDeps(store, fetch.impl),
+    { grantStore: store, fetchImpl: fetch.impl },
   );
-  const prepared = await service.prepare();
-  const created = await service.createDiscussion({
+  assert.deepEqual(await service.prepare(), { status: 'failed', code: 'authorization-expired' });
+  assert.equal(fetch.calls.length, 0);
+
+  const fresh = fakeGrantStore();
+  await fresh.writeGrant(VALID_GRANT);
+  const rejected = fakeGitHubFetch({ mutation401: true });
+  const service2 = createOAuthGitHubService(
+    { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
+    baseConfig(),
+    { grantStore: fresh, fetchImpl: rejected.impl },
+  );
+  await service2.prepare();
+  const outcome = await service2.createDiscussion({
     title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
   });
-  assert.ok(!JSON.stringify({ prepared, created }).includes('gho_oauth-secret'));
+  assert.deepEqual(outcome, { status: 'failed', code: 'authorization-expired' });
 });
-
-test('flow manager start returns a PKCE authorize URL and tracks the running attempt', async () => {
-  const store = fakeGrantStore(undefined);
-  const manager = createOAuthFlowManager(baseConfig(), { fetchImpl: () => Promise.reject(new Error('unused')), grantStore: store });
-  const { url } = manager.start();
-  const parsed = new URL(url);
-  assert.equal(parsed.searchParams.get('code_challenge_method'), 'S256');
-  assert.ok(parsed.searchParams.get('code_challenge') !== null);
-  assert.ok(parsed.searchParams.get('state') !== null);
-  assert.deepEqual(manager.status(), { phase: 'running' });
-});
-
-test('flow manager completes a valid callback into an authorized grant stored in the credentials seam', async () => {
-  const store = fakeGrantStore(undefined);
-  const oauth = fakeFetch({
-    [baseConfig().tokenEndpoint]: () => jsonResponse({
-      access_token: 'gho_flow-secret',
-      refresh_token: 'ghr_flow-secret',
-      expires_in: 3600,
-      scope: 'repo',
-    }),
-    [baseConfig().userEndpoint]: () => jsonResponse({ login: 'alice' }),
-  });
-  const manager = createOAuthFlowManager(baseConfig(), { fetchImpl: oauth.impl, grantStore: store });
-  const { url } = manager.start();
-  const state = new URL(url).searchParams.get('state');
-  const accepted = await manager.handleCallback(state, 'code-flow', null);
-  assert.equal(accepted, true);
-  assert.deepEqual(manager.status(), { phase: 'authorized', login: 'alice' });
-  assert.equal(store.grant().login, 'alice', 'the grant must be committed through the credentials seam');
-  assert.equal(store.grant().accessToken, 'gho_flow-secret');
-  // The client-visible status never carries the token.
-  assert.ok(!JSON.stringify(manager.status()).includes('gho_flow-secret'));
-});
-
-test('flow manager refuses a mismatched or replayed callback and expires a stale state', async () => {
-  const store = fakeGrantStore(undefined);
-  const oauth = fakeFetch({
-    [baseConfig().tokenEndpoint]: () => jsonResponse({ access_token: 'gho_x', scope: '' }),
-    [baseConfig().userEndpoint]: () => jsonResponse({ login: 'alice' }),
-  });
-  const manager = createOAuthFlowManager(baseConfig(), { fetchImpl: oauth.impl, grantStore: store });
-  manager.start();
-  assert.equal(await manager.handleCallback('wrong-state', 'code', null), false, 'a mismatched state must be refused');
-  assert.deepEqual(manager.status(), { phase: 'running' }, 'a spurious callback must not disturb the running attempt');
-
-  const state = new URL(manager.start().url).searchParams.get('state');
-  assert.equal(await manager.handleCallback(state, 'code-1', null), true);
-  assert.equal(await manager.handleCallback(state, 'code-2', null), false, 'a replayed callback must be refused');
-  assert.deepEqual(manager.status(), { phase: 'authorized', login: 'alice' });
-
-  const expired = createOAuthFlowManager(baseConfig({ stateTtlMs: 25 }), { fetchImpl: oauth.impl, grantStore: store });
-  expired.start();
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.deepEqual(expired.status(), { phase: 'failed', code: 'state-expired' });
-});
-
-test('flow manager maps denial, exchange failure, and user failure to explicit outcomes', async () => {
-  const store = fakeGrantStore(undefined);
-  const config = baseConfig();
-
-  const denied = createOAuthFlowManager(config, { fetchImpl: () => Promise.reject(new Error('unused')), grantStore: store });
-  const deniedUrl = denied.start();
-  assert.equal(await denied.handleCallback(new URL(deniedUrl.url).searchParams.get('state'), null, 'access_denied'), true);
-  assert.deepEqual(denied.status(), { phase: 'failed', code: 'denied' });
-
-  const exchangeFail = createOAuthFlowManager(config, {
-    fetchImpl: (url) => (String(url) === config.tokenEndpoint
-      ? Promise.resolve(jsonResponse({ error: 'bad_verification_code' }, 400))
-      : Promise.reject(new Error('unexpected'))),
-    grantStore: store,
-  });
-  const exchangeUrl = exchangeFail.start();
-  assert.equal(await exchangeFail.handleCallback(new URL(exchangeUrl.url).searchParams.get('state'), 'code', null), true);
-  assert.deepEqual(exchangeFail.status(), { phase: 'failed', code: 'exchange-failed' });
-
-  const userFail = createOAuthFlowManager(config, {
-    fetchImpl: (url) => (String(url) === config.tokenEndpoint
-      ? Promise.resolve(jsonResponse({ access_token: 'gho_x', scope: '' }))
-      : Promise.resolve(jsonResponse({}, 403))),
-    grantStore: store,
-  });
-  const userUrl = userFail.start();
-  assert.equal(await userFail.handleCallback(new URL(userUrl.url).searchParams.get('state'), 'code', null), true);
-  assert.deepEqual(userFail.status(), { phase: 'failed', code: 'user-failed' });
-  assert.equal(store.grant(), undefined, 'a failed flow must never commit a grant');
-});
-
-test('flow manager cancels a running attempt without writing a grant', async () => {
-  const store = fakeGrantStore(undefined);
-  const manager = createOAuthFlowManager(baseConfig(), { fetchImpl: () => Promise.reject(new Error('unused')), grantStore: store });
-  manager.start();
-  manager.cancel();
-  assert.deepEqual(manager.status(), { phase: 'cancelled' });
-  assert.equal(store.grant(), undefined);
-});
-

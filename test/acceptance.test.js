@@ -1625,23 +1625,31 @@ test('fake-backed authorized submission: final preview shows exact fields, confi
 
 
 
-/** Start a local fake GitHub OAuth server: an approve/deny authorize page, a token endpoint, and the user endpoint. */
-async function startFakeOAuth() {
+/** Start a local fake GitHub Device Flow server with a scriptable token endpoint and a verification page. */
+async function startFakeDeviceOAuth() {
   const { createServer } = await import('node:http');
   const requests = [];
+  let tokenScript = () => ({ access_token: 'gho_acceptance-device-secret', scope: 'public_repo' });
+  let base = 'http://127.0.0.1:0';
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       requests.push({ url: req.url, body });
-      if (req.url?.startsWith('/access_token')) {
+      if (req.url?.startsWith('/device')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
-          access_token: 'gho_acceptance-oauth-secret',
-          refresh_token: 'ghr_acceptance-oauth-secret',
-          expires_in: 3600,
-          scope: 'repo',
+          device_code: 'device-acceptance-secret',
+          user_code: 'ACCEPT-CODE',
+          verification_uri: base + '/verify',
+          expires_in: 900,
+          interval: 0.05,
         }));
+        return;
+      }
+      if (req.url?.startsWith('/token')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(tokenScript()));
         return;
       }
       if (req.url?.startsWith('/user')) {
@@ -1649,17 +1657,9 @@ async function startFakeOAuth() {
         res.end(JSON.stringify({ login: 'alice' }));
         return;
       }
-      if (req.url?.startsWith('/authorize')) {
-        const url = new URL(req.url, 'http://127.0.0.1');
-        const state = url.searchParams.get('state');
-        const redirect = url.searchParams.get('redirect_uri');
+      if (req.url?.startsWith('/verify')) {
         res.writeHead(200, { 'content-type': 'text/html' });
-        res.end([
-          '<!doctype html><html><body>',
-          '<a id="approve" href="' + redirect + '?code=acceptance-oauth-code&state=' + state + '">Approve</a>',
-          '<a id="deny" href="' + redirect + '?error=access_denied&state=' + state + '">Deny</a>',
-          '</body></html>',
-        ].join(''));
+        res.end('<!doctype html><html><body><h2>Fake GitHub device authorization</h2><p>Enter the code shown in the DSH dialog to authorize.</p></body></html>');
         return;
       }
       res.writeHead(404, { 'content-type': 'text/plain' });
@@ -1668,24 +1668,31 @@ async function startFakeOAuth() {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
-  const base = 'http://127.0.0.1:' + (address === null || typeof address === 'string' ? '0' : address.port);
-  return { server, requests, base };
+  base = 'http://127.0.0.1:' + (address === null || typeof address === 'string' ? '0' : address.port);
+  return {
+    server,
+    requests,
+    base,
+    setTokenScript(script) {
+      tokenScript = script;
+    },
+  };
 }
 
-/** The profile patch layer pointing the plugin at the fake OAuth and GitHub services with the oauth provider. */
+/** The profile patch layer pointing the plugin at the fake Device Flow and GitHub services with the oauth provider. */
 function githubOauthPatch(oauthBase, githubBase) {
   return [
     '- id: dsh-feedback-bridge',
     '  config:',
     '    github:',
     '      graphqlEndpoint: ' + githubBase + '/graphql',
-    '      timeoutMs: 2000',
+    '      timeoutMs: 5000',
     '      auth:',
     '        provider: oauth',
     '      oauth:',
-    '        clientId: acceptance-client',
-    '        authorizeEndpoint: ' + oauthBase + '/authorize',
-    '        tokenEndpoint: ' + oauthBase + '/access_token',
+    '        clientId: acceptance-device-client',
+    '        deviceEndpoint: ' + oauthBase + '/device',
+    '        tokenEndpoint: ' + oauthBase + '/token',
     '        userEndpoint: ' + oauthBase + '/user',
     '',
   ].join('\n');
@@ -1701,7 +1708,7 @@ test('oauth-backed submission: the GUI signs in through a browser handoff, shows
   const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-oauth-ok-'));
 
   const github = await startFakeGitHub();
-  const oauth = await startFakeOAuth();
+  const oauth = await startFakeDeviceOAuth();
   try {
     run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
       cwd: repoRoot,
@@ -1734,15 +1741,22 @@ test('oauth-backed submission: the GUI signs in through a browser handoff, shows
       await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
       assert.match(await page.textContent('[data-testid="dsh-feedback-submission-oauth-disclosure"]'), /credentials provider|凭据/);
 
-      // Sign in: the browser hands off to the fake authorize page.
+      // Sign in: the browser hands off to the (fake) official device page and
+      // the dialog shows the user code while the host polls pending.
+      oauth.setTokenScript(() => ({ error: 'authorization_pending' }));
       const popupPromise = page.waitForEvent('popup');
       await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
       await page.waitForSelector('[data-testid="dsh-feedback-submission-oauth-authorizing"]', { timeout: 20_000 });
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-oauth-user-code"]')).trim(), 'ACCEPT-CODE');
+      assert.equal(await page.locator('[data-testid="dsh-feedback-submission-oauth-copy-code"]').count(), 1);
       const popup = await popupPromise;
-      await popup.waitForSelector('#approve', { timeout: 20_000 });
-      await popup.click('#approve');
+      await popup.waitForSelector('h2', { timeout: 20_000 });
+      assert.match(await popup.textContent('body'), /device authorization|enter the code/i);
+      await page.waitForTimeout(250);
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-oauth-user-code"]')).trim(), 'ACCEPT-CODE', 'the user code stays visible while pending');
 
-      // The main page polls to authorized and shows the public identity.
+      // Approval on GitHub flips the token response; the host polls to authorized.
+      oauth.setTokenScript(() => ({ access_token: 'gho_acceptance-device-secret', scope: 'public_repo' }));
       await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 30_000 });
       assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-account"]')).trim(), 'alice');
       assert.equal(githubMutationCount(github.requests), 0, 'authorizing must not mutate');
@@ -1753,13 +1767,13 @@ test('oauth-backed submission: the GUI signs in through a browser handoff, shows
       assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation per confirmation');
       const mutation = github.requests.find((request) => /mutation\s+CreateDiscussion/.test(request.body));
       assert.ok(mutation);
-      assert.equal(mutation.headers.authorization, 'Bearer gho_acceptance-oauth-secret', 'the mutation runs as the stored grant');
+      assert.equal(mutation.headers.authorization, 'Bearer gho_acceptance-device-secret', 'the mutation runs as the stored grant');
 
-      // No token, code, or verifier ever reaches the Client.
+      // No token or device code ever reaches the Client; the user code may.
       const pageContent = await page.content();
-      assert.ok(!pageContent.includes('gho_acceptance-oauth-secret'), 'the token must never reach the Client DOM');
-      assert.ok(!pageContent.includes('acceptance-oauth-code'), 'the authorization code must never reach the Client DOM');
-      assert.ok(!requests.some((url) => url.includes('gho_acceptance-oauth') || url.includes('acceptance-oauth-code')));
+      assert.ok(!pageContent.includes('gho_acceptance-device-secret'), 'the token must never reach the Client DOM');
+      assert.ok(!pageContent.includes('device-acceptance-secret'), 'the device code must never reach the Client DOM');
+      assert.ok(!requests.some((url) => url.includes('gho_acceptance-device') || url.includes('device-acceptance-secret')));
 
       await browser.close();
     } finally {
@@ -1783,7 +1797,7 @@ test('oauth-backed submission: denial settles as a distinct failure with zero mu
   const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-oauth-deny-'));
 
   const github = await startFakeGitHub();
-  const oauth = await startFakeOAuth();
+  const oauth = await startFakeDeviceOAuth();
   try {
     run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
       cwd: repoRoot,
@@ -1810,26 +1824,27 @@ test('oauth-backed submission: denial settles as a distinct failure with zero mu
       await page.click('[data-testid="dsh-feedback-submission-open"]');
       await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
 
-      // Deny in the browser handoff: distinct failure, zero mutation.
-      const denyPopupPromise = page.waitForEvent('popup');
+      // Denied on GitHub's side: distinct failure, zero mutation.
+      oauth.setTokenScript(() => ({ error: 'access_denied' }));
       await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
-      const denyPopup = await denyPopupPromise;
-      await denyPopup.waitForSelector('#deny', { timeout: 20_000 });
-      await denyPopup.click('#deny');
       await page.waitForSelector('[data-testid="dsh-feedback-submission-oauth-failed"]', { timeout: 30_000 });
       assert.match(await page.textContent('[data-testid="dsh-feedback-submission-oauth-failed"]'), /declined|拒绝/);
       assert.equal(githubMutationCount(github.requests), 0, 'a denial must never mutate');
 
-      // Retry, approve, then disconnect: the grant is revoked and export remains.
+      // Retry, then cancel the pending authorization: back to the sign-in step.
       await page.click('[data-testid="dsh-feedback-submission-oauth-retry"]');
       await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
-      const okPopupPromise = page.waitForEvent('popup');
+      oauth.setTokenScript(() => ({ error: 'authorization_pending' }));
       await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
-      const okPopup = await okPopupPromise;
-      await okPopup.waitForSelector('#approve', { timeout: 20_000 });
-      await okPopup.click('#approve');
-      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 30_000 });
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-oauth-authorizing"]', { timeout: 20_000 });
+      await page.click('[data-testid="dsh-feedback-submission-oauth-cancel"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
+      assert.equal(githubMutationCount(github.requests), 0, 'cancelling must never mutate');
 
+      // Authorize, then disconnect: the grant is revoked and export remains.
+      oauth.setTokenScript(() => ({ access_token: 'gho_acceptance-device-secret', scope: 'public_repo' }));
+      await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 30_000 });
       await page.click('[data-testid="dsh-feedback-submission-oauth-disconnect"]');
       await page.waitForSelector('[data-testid="dsh-feedback-submission-open"]', { timeout: 20_000 });
       assert.equal(await page.locator('[data-testid="dsh-feedback-submission-export"]').count(), 1, 'draft export must remain after disconnect');
@@ -1864,7 +1879,7 @@ test('final confirmation opens as a centered dialog without disturbing the edit 
   const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-geometry-'));
 
   const github = await startFakeGitHub();
-  const oauth = await startFakeOAuth();
+  const oauth = await startFakeDeviceOAuth();
   try {
     run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
       cwd: repoRoot,

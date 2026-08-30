@@ -54,7 +54,6 @@ const SIMILARITY_PATH = '/dsh-feedback-bridge/similarity';
 const SUBMISSION_PATH = '/dsh-feedback-bridge/submission';
 const OAUTH_STATUS_PATH = '/dsh-feedback-bridge/oauth/status';
 const OAUTH_START_PATH = '/dsh-feedback-bridge/oauth/start';
-const OAUTH_CALLBACK_PATH = '/dsh-feedback-bridge/oauth/callback';
 const OAUTH_CANCEL_PATH = '/dsh-feedback-bridge/oauth/cancel';
 const OAUTH_DISCONNECT_PATH = '/dsh-feedback-bridge/oauth/disconnect';
 
@@ -722,10 +721,6 @@ async function handleSubmissionConfirm(service: GitHubService, store: Submission
   writeJson(response, 200, outcome);
 }
 
-/** Fixed end page for the callback tab; never echoes the code or state. */
-const OAUTH_CALLBACK_PAGE = '<!doctype html><html><body style="font-family: sans-serif; padding: 2rem; text-align: center"><h2>Authorization complete — you can close this tab.</h2></body></html>';
-const OAUTH_CALLBACK_INVALID_PAGE = '<!doctype html><html><body style="font-family: sans-serif; padding: 2rem; text-align: center"><h2>Invalid authorization link.</h2></body></html>';
-
 /**
  * Handle one GET request on the oauth status route: the client-visible OAuth
  * state, or `supported: false` when the oauth provider is not configured.
@@ -745,6 +740,15 @@ async function handleOAuthStatus(flow: OAuthFlowManager | null, request: Incomin
     return;
   }
   const status = flow.status();
+  if (status.phase === 'running') {
+    writeJson(response, 200, {
+      supported: true,
+      status: 'running',
+      userCode: status.userCode,
+      verificationUri: status.verificationUri,
+    });
+    return;
+  }
   if (status.phase === 'authorized') {
     writeJson(response, 200, { supported: true, status: 'authorized', identity: { login: status.login } });
     return;
@@ -757,8 +761,9 @@ async function handleOAuthStatus(flow: OAuthFlowManager | null, request: Incomin
 }
 
 /**
- * Handle one POST request on the oauth start route: begin one PKCE attempt
- * and return the browser authorize URL. Only the URL leaves the Host.
+ * Handle one POST request on the oauth start route: begin the Device Flow and
+ * return the GitHub verification URI and the user code the human must enter
+ * on GitHub's official device page. The device code stays on the Host.
  *
  * @param flow - the oauth flow manager.
  * @param request - the incoming request.
@@ -770,35 +775,12 @@ async function handleOAuthStart(flow: OAuthFlowManager, request: IncomingMessage
     writeJson(response, 405, { error: 'method not allowed' }, { allow: 'POST' });
     return;
   }
-  const { url } = flow.start();
-  writeJson(response, 200, { status: 'running', url });
-}
-
-/**
- * Handle the browser callback: validate the one-shot state and settle the
- * attempt. The authorization code is consumed on the Host only and never
- * echoed in the response page or any log.
- *
- * @param flow - the oauth flow manager.
- * @param request - the incoming request.
- * @param response - the server response.
- * @returns void.
- */
-async function handleOAuthCallback(flow: OAuthFlowManager, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  if (request.method !== 'GET') {
-    writeJson(response, 405, { error: 'method not allowed' }, { allow: 'GET' });
+  const started = await flow.start();
+  if (started.status === 'failed') {
+    writeJson(response, 200, { status: 'failed', code: started.code });
     return;
   }
-  const url = new URL(request.url ?? '/', 'http://dsh-feedback-bridge.local');
-  const state = url.searchParams.get('state');
-  const code = url.searchParams.get('code');
-  const error = url.searchParams.get('error');
-  if (state === null) {
-    writeHtml(response, 400, OAUTH_CALLBACK_INVALID_PAGE);
-    return;
-  }
-  const accepted = await flow.handleCallback(state, code, error);
-  writeHtml(response, accepted ? 200 : 400, accepted ? OAUTH_CALLBACK_PAGE : OAUTH_CALLBACK_INVALID_PAGE);
+  writeJson(response, 200, { status: 'running', verificationUri: started.verificationUri, userCode: started.userCode });
 }
 
 /**
@@ -835,19 +817,6 @@ async function handleOAuthDisconnect(grantStore: GitHubGrantStore, request: Inco
   }
   await grantStore.clearGrant();
   writeJson(response, 200, { ok: true });
-}
-
-/**
- * Write a fixed HTML page to the browser (used by the callback route).
- *
- * @param response - the server response.
- * @param status - HTTP status code.
- * @param html - the page markup.
- * @returns void.
- */
-function writeHtml(response: ServerResponse, status: number, html: string): void {
-  response.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-  response.end(html);
 }
 
 /**
@@ -935,7 +904,7 @@ export function apply(ctx: Context, config?: PluginConfig): void {
   const similarityConfig = normalizeSimilarityConfig(config?.similarity);
   const githubConfig: GitHubConfig = normalizeGitHubConfig(config?.github);
   const oauthConfig: GitHubOAuthConfig | null = githubConfig.auth.provider === 'oauth'
-    ? normalizeOAuthConfig((config?.github as { oauth?: unknown } | undefined)?.oauth, 'http://127.0.0.1:' + ctx.webServer.port)
+    ? normalizeOAuthConfig((config?.github as { oauth?: unknown } | undefined)?.oauth)
     : null;
   const grantStore: GitHubGrantStore = createCredentialsGrantStore(ctx.credentials);
   const githubService = oauthConfig === null
@@ -1006,13 +975,6 @@ export function apply(ctx: Context, config?: PluginConfig): void {
         handler: (request, response) => handleOAuthStart(oauthFlow, request, response),
       } satisfies WebRoute);
     }, 'dsh-feedback-bridge: oauth start route');
-    ctx.effect(() => {
-      return ctx.webServer.register({
-        kind: 'exact',
-        path: OAUTH_CALLBACK_PATH,
-        handler: (request, response) => handleOAuthCallback(oauthFlow, request, response),
-      } satisfies WebRoute);
-    }, 'dsh-feedback-bridge: oauth callback route');
     ctx.effect(() => {
       return ctx.webServer.register({
         kind: 'exact',

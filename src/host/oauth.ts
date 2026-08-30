@@ -1,18 +1,19 @@
 /**
- * Host-only GitHub OAuth authorization-code + PKCE flow (Issue #10): the
- * plugin owns the complete dance — verifier/challenge, one-shot state,
- * authorize URL, callback validation, token exchange, identity resolution,
- * and grant persistence through the DSH credentials service — because the
- * DSH web profile does not compose the `ctx.authorization` seam in the
- * tested DSH version. All secrets (authorization code, PKCE verifier, access
- * and refresh tokens) stay on the Host and are never serialized into Client
- * payloads, model input, drafts, displayable events, or logs.
+ * Host-only GitHub OAuth Device Flow (Issue #10, RFC 8628): the plugin owns
+ * device-code request, interval polling, token handling, identity resolution,
+ * and grant persistence through the DSH credentials service. No client secret
+ * is required, distributed, or configured: the published plugin ships only the
+ * maintainer-registered public client ID and talks directly to GitHub's
+ * official device and token endpoints — there is no callback route and no
+ * project-operated OAuth backend. All secrets (device code, access token) stay
+ * on the Host and are never serialized into Client payloads, model input,
+ * drafts, displayable events, or logs; only the user code and verification URI
+ * are shown in the active authorization UI.
  *
- * This module is Host-only: it imports node:crypto and the credentials
- * service, so it must never be reachable from the Client compiler face.
+ * This module is Host-only: it imports the credentials service, so it must
+ * never be reachable from the Client compiler face.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
 import { credentialKey } from '@deepseek-ai/dsh-credentials';
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials';
 import {
@@ -35,42 +36,37 @@ import {
   type OAuthGrantPayload,
 } from './github.js';
 
-/** Default OAuth endpoints for github.com; overridable for deployment and tests. */
-export const DEFAULT_OAUTH_AUTHORIZE_ENDPOINT = 'https://github.com/login/oauth/authorize';
+/** Default endpoints for github.com; overridable for deployment and tests. */
+export const DEFAULT_DEVICE_ENDPOINT = 'https://github.com/login/device/code';
 export const DEFAULT_OAUTH_TOKEN_ENDPOINT = 'https://github.com/login/oauth/access_token';
 export const DEFAULT_OAUTH_USER_ENDPOINT = 'https://api.github.com/user';
-export const DEFAULT_OAUTH_STATE_TTL_MS = 600_000;
+export const DEFAULT_OAUTH_SCOPES = 'public_repo';
 
-/** Deployment-varying OAuth app settings; normalized from `github.oauth`. */
+/** Deployment-varying Device Flow settings; normalized from `github.oauth`. */
 export interface GitHubOAuthConfig {
   clientId: string;
-  clientSecret?: string;
-  authorizeEndpoint: string;
+  deviceEndpoint: string;
   tokenEndpoint: string;
   userEndpoint: string;
-  redirectUri: string;
   scopes: string;
-  stateTtlMs: number;
   timeoutMs: number;
 }
 
-/** The credential record this plugin's GitHub OAuth grant is stored under. */
+/** The credential record this plugin's GitHub grant is stored under. */
 export const GITHUB_OAUTH_CREDENTIAL_KEY = credentialKey('dsh-feedback-bridge', 'github-oauth');
 
-/** Encode bytes as unpadded base64url (RFC 4648 §5). */
-function base64url(input: Buffer): string {
-  return input.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
 /**
- * Resolve the OAuth config from the raw `github.oauth` value, failing loud
- * at load on malformed values.
+ * Resolve the Device Flow config from the raw `github.oauth` value, failing
+ * loud at load on malformed values. Authorization-code/PKCE keys such as
+ * `clientSecret`, `authorizeEndpoint`, `redirectBaseUrl`, and
+ * `stateTtlMs` are rejected so a stale production config can never silently
+ * fall back to a secret-carrying path.
  *
  * @param raw - the plugin's github.oauth config, or undefined.
  * @returns the resolved oauth config.
  * @throws {Error} naming the first invalid aspect.
  */
-export function normalizeOAuthConfig(raw: unknown, fallbackBaseUrl = 'http://127.0.0.1:3080'): GitHubOAuthConfig {
+export function normalizeOAuthConfig(raw: unknown): GitHubOAuthConfig {
   if (raw === undefined || raw === null) {
     throw new Error('dsh-feedback-bridge: github.auth provider "oauth" requires github.oauth config');
   }
@@ -78,7 +74,7 @@ export function normalizeOAuthConfig(raw: unknown, fallbackBaseUrl = 'http://127
     throw new Error('dsh-feedback-bridge: github.oauth must be an object');
   }
   const record = raw as Record<string, unknown>;
-  const known = new Set(['clientId', 'clientSecret', 'authorizeEndpoint', 'tokenEndpoint', 'userEndpoint', 'redirectBaseUrl', 'scopes', 'stateTtlMs', 'timeoutMs']);
+  const known = new Set(['clientId', 'deviceEndpoint', 'tokenEndpoint', 'userEndpoint', 'scopes', 'timeoutMs']);
   for (const key of Object.keys(record)) {
     if (!known.has(key)) {
       throw new Error('dsh-feedback-bridge: unknown github.oauth key ' + key);
@@ -102,33 +98,16 @@ export function normalizeOAuthConfig(raw: unknown, fallbackBaseUrl = 'http://127
     }
     return value;
   };
-  const stringField = (key: string, fallback: string): string => {
-    const value = record[key] ?? fallback;
-    if (typeof value !== 'string') {
-      throw new Error('dsh-feedback-bridge: github.oauth.' + key + ' must be a string');
-    }
-    return value;
-  };
-  const redirectBaseUrl = record.redirectBaseUrl;
-  if (redirectBaseUrl !== undefined && (typeof redirectBaseUrl !== 'string' || !/^https?:\/\//.test(redirectBaseUrl))) {
-    throw new Error('dsh-feedback-bridge: github.oauth.redirectBaseUrl must be an http(s) URL');
-  }
-  const redirectUri = redirectBaseUrl === undefined
-    ? fallbackBaseUrl.replace(/\/$/, '') + '/dsh-feedback-bridge/oauth/callback'
-    : redirectBaseUrl.replace(/\/$/, '') + '/dsh-feedback-bridge/oauth/callback';
-  const clientSecret = record.clientSecret;
-  if (clientSecret !== undefined && typeof clientSecret !== 'string') {
-    throw new Error('dsh-feedback-bridge: github.oauth.clientSecret must be a string');
+  const scopes = record.scopes ?? DEFAULT_OAUTH_SCOPES;
+  if (typeof scopes !== 'string') {
+    throw new Error('dsh-feedback-bridge: github.oauth.scopes must be a string');
   }
   return {
     clientId,
-    ...(clientSecret === undefined ? {} : { clientSecret }),
-    authorizeEndpoint: urlField('authorizeEndpoint', DEFAULT_OAUTH_AUTHORIZE_ENDPOINT),
+    deviceEndpoint: urlField('deviceEndpoint', DEFAULT_DEVICE_ENDPOINT),
     tokenEndpoint: urlField('tokenEndpoint', DEFAULT_OAUTH_TOKEN_ENDPOINT),
     userEndpoint: urlField('userEndpoint', DEFAULT_OAUTH_USER_ENDPOINT),
-    redirectUri,
-    scopes: stringField('scopes', ''),
-    stateTtlMs: positiveInt('stateTtlMs', DEFAULT_OAUTH_STATE_TTL_MS),
+    scopes,
     timeoutMs: positiveInt('timeoutMs', 10_000),
   };
 }
@@ -171,8 +150,8 @@ export function parseGrantPayload(payload: unknown): OAuthGrantPayload {
 
 /**
  * The DSH credentials adapter behind the plugin's grant store: reads, writes,
- * and clears the GitHub OAuth grant record. Writes go through the seam's
- * serialized read-modify-write path; the record payload is opaque to the seam.
+ * and clears the GitHub grant record through the seam's serialized
+ * read-modify-write path.
  *
  * @param credentials - the injected credentials provider.
  * @returns the grant store the oauth provider and flow use.
@@ -193,97 +172,107 @@ export function createCredentialsGrantStore(credentials: Pick<CredentialProvider
   };
 }
 
-/** Generate a random RFC 7636 PKCE verifier (43 chars, base64url). */
-export function createPkceVerifier(): string {
-  return base64url(randomBytes(32));
+/** The parsed GitHub device-code response. */
+export interface DeviceCodeInfo {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  expiresInSeconds: number;
+  intervalSeconds: number;
 }
 
-/** Derive the RFC 7636 S256 code challenge from a verifier. */
-export function createPkceChallenge(verifier: string): string {
-  return base64url(createHash('sha256').update(verifier).digest());
-}
-
-/** One issued state plus its verifier, consumable exactly once before the TTL. */
-export interface OAuthStateStore {
-  issue(): { state: string; verifier: string; challenge: string };
-  consume(state: string): string | null;
-}
+/** Result of requesting a device code. */
+export type DeviceCodeOutcome =
+  | { status: 'ok'; device: DeviceCodeInfo }
+  | { status: 'failed'; code: 'exchange-failed' | 'network' };
 
 /**
- * Create a one-shot state store: `issue` returns a random state bound to a
- * verifier; `consume` returns the verifier exactly once and rejects unknown
- * or expired states.
- *
- * @param ttlMs - how long an issued state stays valid.
- * @returns the store.
- */
-export function createOAuthStateStore(ttlMs: number): OAuthStateStore {
-  const entries = new Map<string, { verifier: string; challenge: string; expiresAt: number }>();
-  return {
-    issue() {
-      const state = base64url(randomBytes(24));
-      const verifier = createPkceVerifier();
-      const challenge = createPkceChallenge(verifier);
-      entries.set(state, { verifier, challenge, expiresAt: Date.now() + ttlMs });
-      return { state, verifier, challenge };
-    },
-    consume(state) {
-      const entry = entries.get(state);
-      if (entry === undefined) return null;
-      entries.delete(state);
-      if (Date.now() > entry.expiresAt) return null;
-      return entry.verifier;
-    },
-  };
-}
-
-/** Build the GitHub OAuth authorization URL with PKCE parameters. */
-export function buildAuthorizeUrl(config: GitHubOAuthConfig, state: string, challenge: string): string {
-  const url = new URL(config.authorizeEndpoint);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('client_id', config.clientId);
-  url.searchParams.set('redirect_uri', config.redirectUri);
-  url.searchParams.set('state', state);
-  url.searchParams.set('scope', config.scopes);
-  url.searchParams.set('code_challenge', challenge);
-  url.searchParams.set('code_challenge_method', 'S256');
-  return url.toString();
-}
-
-/** The token-exchange outcome: grant fields, or an explicit failure class. */
-export type OAuthExchangeResult =
-  | {
-    status: 'ok';
-    accessToken: string;
-    refreshToken?: string;
-    expiresInSeconds?: number;
-    scope: string;
-  }
-  | { status: 'failed'; code: 'exchange-error' | 'network' };
-
-/**
- * Exchange an authorization code for tokens. The code and verifier appear
- * only in the Host-to-GitHub request body and are never returned or logged.
+ * Request a device code from GitHub's official device endpoint. Only the
+ * public client id and scope are sent; the device code itself stays on the
+ * Host and is never returned to the Client or logged.
  *
  * @param deps - the injected fetch seam.
  * @param config - oauth config.
- * @param code - the single-use authorization code from the callback.
- * @param verifier - the PKCE verifier bound to the callback's state.
- * @returns the grant fields or an explicit failure.
+ * @returns the parsed device flow fields or an explicit failure.
  */
-export async function exchangeCode(
+export async function requestDeviceCode(
   deps: { fetchImpl: GitHubDeps['fetchImpl'] },
   config: GitHubOAuthConfig,
-  code: string,
-  verifier: string,
-): Promise<OAuthExchangeResult> {
+): Promise<DeviceCodeOutcome> {
+  const body = new URLSearchParams({ client_id: config.clientId, scope: config.scopes });
+  let response: Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
+  try {
+    response = await deps.fetchImpl(config.deviceEndpoint, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  } catch {
+    return { status: 'failed', code: 'network' };
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return { status: 'failed', code: response.ok ? 'exchange-failed' : 'network' };
+  }
+  if (!response.ok) {
+    return { status: 'failed', code: 'exchange-failed' };
+  }
+  const record = payload as {
+    device_code?: unknown;
+    user_code?: unknown;
+    verification_uri?: unknown;
+    expires_in?: unknown;
+    interval?: unknown;
+  };
+  const deviceCode = record.device_code;
+  const userCode = record.user_code;
+  const verificationUri = record.verification_uri;
+  const expiresInSeconds = record.expires_in;
+  const intervalSeconds = record.interval;
+  if (
+    typeof deviceCode !== 'string' || deviceCode === ''
+    || typeof userCode !== 'string' || userCode === ''
+    || typeof verificationUri !== 'string' || verificationUri === ''
+    || typeof expiresInSeconds !== 'number' || !Number.isFinite(expiresInSeconds)
+    || typeof intervalSeconds !== 'number' || !Number.isFinite(intervalSeconds)
+  ) {
+    return { status: 'failed', code: 'exchange-failed' };
+  }
+  return {
+    status: 'ok',
+    device: { deviceCode, userCode, verificationUri, expiresInSeconds, intervalSeconds },
+  };
+}
+
+/** One poll of the device token endpoint. */
+export type TokenPollOutcome =
+  | { status: 'pending' }
+  | { status: 'slow-down' }
+  | { status: 'ok'; accessToken: string; scope: string }
+  | { status: 'failed'; code: 'denied' | 'expired' | 'exchange-failed' | 'network' };
+
+/**
+ * Poll GitHub's token endpoint with the device code, mapping every documented
+ * outcome: `authorization_pending`, `slow_down`, `expired_token`,
+ * `access_denied`, success, and any other failure.
+ *
+ * @param deps - the injected fetch seam.
+ * @param config - oauth config.
+ * @param deviceCode - the Host-held device code.
+ * @returns the mapped outcome.
+ */
+export async function pollDeviceToken(
+  deps: { fetchImpl: GitHubDeps['fetchImpl'] },
+  config: GitHubOAuthConfig,
+  deviceCode: string,
+): Promise<TokenPollOutcome> {
   const body = new URLSearchParams({
     client_id: config.clientId,
-    code,
-    redirect_uri: config.redirectUri,
-    code_verifier: verifier,
+    device_code: deviceCode,
+    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
   });
-  if (config.clientSecret !== undefined) body.set('client_secret', config.clientSecret);
   let response: Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
   try {
     response = await deps.fetchImpl(config.tokenEndpoint, {
@@ -298,28 +287,43 @@ export async function exchangeCode(
   try {
     payload = await response.json();
   } catch {
-    return { status: 'failed', code: response.ok ? 'exchange-error' : 'network' };
+    return { status: 'failed', code: response.ok ? 'exchange-failed' : 'network' };
   }
   if (!response.ok) {
-    return { status: 'failed', code: 'exchange-error' };
+    return { status: 'failed', code: 'exchange-failed' };
   }
-  const record = payload as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown };
-  const accessToken = record.access_token;
-  if (typeof accessToken !== 'string' || accessToken === '') {
-    return { status: 'failed', code: 'exchange-error' };
+  const record = payload as { access_token?: unknown; scope?: unknown; error?: unknown };
+  if (record.access_token !== undefined) {
+    const accessToken = record.access_token;
+    if (typeof accessToken !== 'string' || accessToken === '') {
+      return { status: 'failed', code: 'exchange-failed' };
+    }
+    return { status: 'ok', accessToken, scope: typeof record.scope === 'string' ? record.scope : '' };
   }
-  const result: OAuthExchangeResult = {
-    status: 'ok',
-    accessToken,
-    scope: typeof record.scope === 'string' ? record.scope : '',
-  };
-  if (typeof record.refresh_token === 'string' && record.refresh_token !== '') {
-    result.refreshToken = record.refresh_token;
+  switch (record.error) {
+    case 'authorization_pending':
+      return { status: 'pending' };
+    case 'slow_down':
+      return { status: 'slow-down' };
+    case 'expired_token':
+      return { status: 'failed', code: 'expired' };
+    case 'access_denied':
+      return { status: 'failed', code: 'denied' };
+    default:
+      return { status: 'failed', code: 'exchange-failed' };
   }
-  if (typeof record.expires_in === 'number' && Number.isFinite(record.expires_in)) {
-    result.expiresInSeconds = record.expires_in;
-  }
-  return result;
+}
+
+/**
+ * Whether every requested scope is present in the granted space-separated set.
+ *
+ * @param grantedScopes - the space-separated scopes GitHub returned.
+ * @param requestedScopes - the space-separated scopes the config requested.
+ * @returns true when all requested scopes are granted.
+ */
+export function hasGrantedScope(grantedScopes: string, requestedScopes: string): boolean {
+  const granted = new Set(grantedScopes.trim().split(/\s+/).filter(Boolean));
+  return requestedScopes.trim().split(/\s+/).filter(Boolean).every((scope) => granted.has(scope));
 }
 
 /** Resolve the public GitHub identity for a token; throws on any failure. */
@@ -352,6 +356,10 @@ export async function fetchGitHubUser(
   }
   return { login };
 }
+
+// ---------------------------------------------------------------------------
+// submission provider (unchanged boundary, reads the stored grant)
+// ---------------------------------------------------------------------------
 
 /** Read HTTP classification for the oauth provider, where a 401 means the stored token is expired. */
 function oauthReadHttpCode(status: number): GitHubSubmissionFailureCode {
@@ -496,34 +504,42 @@ export function createOAuthGitHubService(
   };
 }
 
-/** Client-visible flow failure classes. */
-export type OAuthFailureCode = 'denied' | 'state-expired' | 'exchange-failed' | 'user-failed' | 'network';
+// ---------------------------------------------------------------------------
+// device flow manager
+// ---------------------------------------------------------------------------
 
-/** Client-visible status of the active OAuth attempt; never carries a secret. */
+/** Client-visible flow failure classes. */
+export type OAuthFailureCode = 'denied' | 'expired' | 'insufficient-scope' | 'exchange-failed' | 'network';
+
+/** Client-visible status of the active device flow; never carries a secret. */
 export type OAuthAttemptStatus =
   | { phase: 'idle' }
-  | { phase: 'running' }
+  | { phase: 'running'; userCode: string; verificationUri: string }
   | { phase: 'authorized'; login: string }
   | { phase: 'cancelled' }
   | { phase: 'failed'; code: OAuthFailureCode };
 
-/** The plugin-owned OAuth flow surface used by the routes. */
+/** Result of starting a device flow attempt. */
+export type OAuthStartResult =
+  | { status: 'running'; userCode: string; verificationUri: string }
+  | { status: 'failed'; code: OAuthFailureCode };
+
+/** The plugin-owned device flow surface used by the routes. */
 export interface OAuthFlowManager {
-  /** Start one attempt, replacing any previous; returns the authorize URL. */
-  start(): { url: string };
+  /** Start one attempt, replacing any previous; the Host polls until it settles. */
+  start(): Promise<OAuthStartResult>;
   /** The current client-visible status. */
   status(): OAuthAttemptStatus;
-  /** Handle the callback; returns false when the state is spurious or replayed. */
-  handleCallback(state: string, code: string | null, error: string | null): Promise<boolean>;
-  /** Cancel the running attempt. */
+  /** Cancel the running attempt and stop polling. */
   cancel(): void;
 }
 
 /**
- * Create the plugin-owned OAuth flow manager: one attempt at a time, PKCE
- * verifier/state owned entirely on the Host, the callback validated against
- * the one-shot state, and the grant committed through the credentials seam
- * only on success.
+ * Create the plugin-owned GitHub Device Flow manager: one attempt at a time,
+ * the device code held entirely on the Host, polling driven by the Host at
+ * GitHub's interval (slowed down on `slow_down`), and the grant committed
+ * through the credentials seam only after the token arrives with the
+ * requested scope and the public identity resolves.
  *
  * @param config - resolved oauth config.
  * @param deps - the fetch seam and the grant store.
@@ -533,79 +549,97 @@ export function createOAuthFlowManager(
   config: GitHubOAuthConfig,
   deps: { fetchImpl: GitHubDeps['fetchImpl']; grantStore: GitHubGrantStore },
 ): OAuthFlowManager {
-  const stateStore = createOAuthStateStore(config.stateTtlMs);
-  let current: { state: string; url: string } | null = null;
-  let consumed = false;
+  let current: {
+    deviceCode: string;
+    userCode: string;
+    verificationUri: string;
+    expiresAt: number;
+  } | null = null;
+  let intervalMs = 5_000;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let status: OAuthAttemptStatus = { phase: 'idle' };
-  let ttlTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
 
   const settle = (next: OAuthAttemptStatus): void => {
+    clearTimer();
     status = next;
-    if (ttlTimer !== null) {
-      clearTimeout(ttlTimer);
-      ttlTimer = null;
-    }
     current = null;
-    consumed = false;
+  };
+
+  const poll = async (): Promise<void> => {
+    if (current === null) return;
+    if (Date.now() > current.expiresAt) {
+      settle({ phase: 'failed', code: 'expired' });
+      return;
+    }
+    const outcome = await pollDeviceToken({ fetchImpl: deps.fetchImpl }, config, current.deviceCode);
+    if (current === null) return;
+    if (outcome.status === 'pending') {
+      timer = setTimeout(() => void poll(), intervalMs);
+      return;
+    }
+    if (outcome.status === 'slow-down') {
+      // RFC 8628: slow_down means poll less often — add five seconds.
+      intervalMs += 5_000;
+      timer = setTimeout(() => void poll(), intervalMs);
+      return;
+    }
+    if (outcome.status === 'failed') {
+      settle({ phase: 'failed', code: outcome.code });
+      return;
+    }
+    if (!hasGrantedScope(outcome.scope, config.scopes)) {
+      settle({ phase: 'failed', code: 'insufficient-scope' });
+      return;
+    }
+    let identity: GitHubIdentity;
+    try {
+      identity = await fetchGitHubUser({ fetchImpl: deps.fetchImpl }, config, outcome.accessToken);
+    } catch {
+      settle({ phase: 'failed', code: 'exchange-failed' });
+      return;
+    }
+    if (current === null) return;
+    const grant: OAuthGrantPayload = {
+      accessToken: outcome.accessToken,
+      login: identity.login,
+      scopes: outcome.scope,
+    };
+    await deps.grantStore.writeGrant(grant);
+    settle({ phase: 'authorized', login: identity.login });
   };
 
   return {
-    start() {
-      if (ttlTimer !== null) clearTimeout(ttlTimer);
-      const issued = stateStore.issue();
-      current = { state: issued.state, url: buildAuthorizeUrl(config, issued.state, issued.challenge) };
-      consumed = false;
-      status = { phase: 'running' };
-      ttlTimer = setTimeout(() => settle({ phase: 'failed', code: 'state-expired' }), config.stateTtlMs);
-      return { url: current.url };
+    async start() {
+      clearTimer();
+      const requested = await requestDeviceCode({ fetchImpl: deps.fetchImpl }, config);
+      if (requested.status === 'failed') {
+        settle({ phase: 'failed', code: requested.code });
+        return { status: 'failed', code: requested.code };
+      }
+      const { device } = requested;
+      current = {
+        deviceCode: device.deviceCode,
+        userCode: device.userCode,
+        verificationUri: device.verificationUri,
+        expiresAt: Date.now() + device.expiresInSeconds * 1000,
+      };
+      intervalMs = Math.max(10, Math.round(device.intervalSeconds * 1000));
+      status = { phase: 'running', userCode: device.userCode, verificationUri: device.verificationUri };
+      timer = setTimeout(() => void poll(), intervalMs);
+      return { status: 'running', userCode: device.userCode, verificationUri: device.verificationUri };
     },
     status() {
       return status;
-    },
-    async handleCallback(state, code, error) {
-      if (current === null || state !== current.state || consumed) {
-        return false;
-      }
-      consumed = true;
-      const verifier = stateStore.consume(state);
-      if (verifier === null) {
-        settle({ phase: 'failed', code: 'state-expired' });
-        return true;
-      }
-      if (error === 'access_denied') {
-        settle({ phase: 'failed', code: 'denied' });
-        return true;
-      }
-      if (error !== null || code === null) {
-        settle({ phase: 'failed', code: 'exchange-failed' });
-        return true;
-      }
-      const exchanged = await exchangeCode({ fetchImpl: deps.fetchImpl }, config, code, verifier);
-      if (exchanged.status === 'failed') {
-        settle({ phase: 'failed', code: exchanged.code === 'network' ? 'network' : 'exchange-failed' });
-        return true;
-      }
-      let identity: GitHubIdentity;
-      try {
-        identity = await fetchGitHubUser({ fetchImpl: deps.fetchImpl }, config, exchanged.accessToken);
-      } catch {
-        settle({ phase: 'failed', code: 'user-failed' });
-        return true;
-      }
-      const grant: OAuthGrantPayload = {
-        accessToken: exchanged.accessToken,
-        login: identity.login,
-        scopes: exchanged.scope,
-      };
-      if (exchanged.refreshToken !== undefined) grant.refreshToken = exchanged.refreshToken;
-      if (exchanged.expiresInSeconds !== undefined) grant.expiresAt = Date.now() + exchanged.expiresInSeconds * 1000;
-      await deps.grantStore.writeGrant(grant);
-      settle({ phase: 'authorized', login: identity.login });
-      return true;
     },
     cancel() {
       if (current !== null) settle({ phase: 'cancelled' });
     },
   };
 }
-

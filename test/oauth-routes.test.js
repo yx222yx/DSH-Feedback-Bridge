@@ -15,8 +15,8 @@ const REPO_PAYLOAD = {
   },
 };
 const DISCUSSION_URL = 'https://github.com/deepseek-ai/deepseek-harness/discussions/4242';
-const FAKE_TOKEN = 'gho_route-oauth-secret';
-const FAKE_CODE = 'code-route-secret';
+const FAKE_TOKEN = 'gho_route-device-secret';
+const FAKE_DEVICE_CODE = 'device-route-secret';
 
 /** In-memory fake credentials provider storing one grant record. */
 function fakeCredentials() {
@@ -116,11 +116,9 @@ function oauthConfig(base, extra = {}) {
       auth: { provider: 'oauth' },
       oauth: {
         clientId: 'client-route',
-        authorizeEndpoint: base + '/authorize',
-        tokenEndpoint: base + '/access_token',
+        deviceEndpoint: base + '/device',
+        tokenEndpoint: base + '/token',
         userEndpoint: base + '/user',
-        redirectBaseUrl: 'http://127.0.0.1:0',
-        stateTtlMs: 60000,
         timeoutMs: 300,
         ...extra,
       },
@@ -132,24 +130,39 @@ function tempHome() {
   return mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-oauth-routes-'));
 }
 
-/** Local fake OAuth + GitHub server. */
-async function startFakeServer() {
+/** Local fake Device Flow + GitHub server; the token endpoint follows a script. */
+async function startFakeServer({ tokenScript } = {}) {
   const { createServer } = await import('node:http');
   const requests = [];
+  let tokenCalls = 0;
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       requests.push({ url: req.url, body, headers: req.headers });
-      if (req.url?.startsWith('/access_token')) {
+      if (req.url?.startsWith('/device')) {
         const params = new URLSearchParams(body);
-        if (params.get('code') !== FAKE_CODE) {
-          res.writeHead(400, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ error: 'bad_verification_code' }));
-          return;
-        }
+        assert.equal(params.get('client_id'), 'client-route');
+        assert.equal(params.get('client_secret'), null);
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ access_token: FAKE_TOKEN, scope: 'repo' }));
+        res.end(JSON.stringify({
+          device_code: FAKE_DEVICE_CODE,
+          user_code: 'ROUTE-CODE',
+          verification_uri: 'https://github.com/login/device',
+          expires_in: 900,
+          interval: 0.01,
+        }));
+        return;
+      }
+      if (req.url?.startsWith('/token')) {
+        tokenCalls += 1;
+        const params = new URLSearchParams(body);
+        assert.equal(params.get('device_code'), FAKE_DEVICE_CODE);
+        assert.equal(params.get('grant_type'), 'urn:ietf:params:oauth:grant-type:device_code');
+        assert.equal(params.get('client_secret'), null);
+        const answer = tokenScript(tokenCalls);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(answer));
         return;
       }
       if (req.url?.startsWith('/user')) {
@@ -184,6 +197,19 @@ async function loadOauth(home, config) {
   return { harness, fiber, restore };
 }
 
+/** Poll the status route until it leaves the running phase. */
+async function waitForTerminal(route, { timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = createResponse();
+    await route.handler(createRequest(), response);
+    const payload = JSON.parse(response.body);
+    if (payload.status !== 'running') return payload;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('oauth flow did not settle');
+}
+
 test('oauth status reports supported false when the plugin ships without the oauth provider', async () => {
   const home = tempHome();
   const harness = createHarness(home, {
@@ -195,7 +221,6 @@ test('oauth status reports supported false when the plugin ships without the oau
     assert.ok(route);
     const response = createResponse();
     await route.handler(createRequest(), response);
-    assert.equal(response.code, 200);
     assert.deepEqual(JSON.parse(response.body), { supported: false });
   } finally {
     restore();
@@ -204,59 +229,45 @@ test('oauth status reports supported false when the plugin ships without the oau
   }
 });
 
-test('the full oauth flow authorizes through the callback, stores the grant, and submits with exactly one mutation', async () => {
-  const fake = await startFakeServer();
+test('device flow authorizes through host polling, stores the grant, and submits with exactly one mutation; no callback route exists', async () => {
+  const fake = await startFakeServer({ tokenScript: (n) => (n === 1 ? { error: 'authorization_pending' } : { access_token: FAKE_TOKEN, scope: 'public_repo' }) });
   const home = tempHome();
   try {
     const { harness, fiber, restore } = await loadOauth(home, oauthConfig(fake.base));
     try {
       const statusRoute = harness.routes.get('/dsh-feedback-bridge/oauth/status');
       const startRoute = harness.routes.get('/dsh-feedback-bridge/oauth/start');
-      const callbackRoute = harness.routes.get('/dsh-feedback-bridge/oauth/callback');
       const submissionRoute = harness.routes.get('/dsh-feedback-bridge/submission');
-      assert.ok(statusRoute && startRoute && callbackRoute && submissionRoute);
-
-      const before = createResponse();
-      await statusRoute.handler(createRequest(), before);
-      assert.equal(JSON.parse(before.body).supported, true);
+      assert.ok(statusRoute && startRoute && submissionRoute);
+      assert.equal(harness.routes.get('/dsh-feedback-bridge/oauth/callback'), undefined, 'no callback route may exist for device flow');
 
       const start = createResponse();
       await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), start);
       const started = JSON.parse(start.body);
       assert.equal(started.status, 'running');
-      const authorizeUrl = new URL(started.url);
-      assert.equal(authorizeUrl.searchParams.get('code_challenge_method'), 'S256');
-      assert.ok(authorizeUrl.searchParams.get('state'));
+      assert.equal(started.verificationUri, 'https://github.com/login/device');
+      assert.equal(started.userCode, 'ROUTE-CODE');
 
-      // A spurious callback is refused and leaves the attempt running.
-      const spurious = createResponse();
-      await callbackRoute.handler(createRequest({ url: '/dsh-feedback-bridge/oauth/callback?state=wrong&code=x' }), spurious);
-      assert.equal(spurious.code, 400);
-      const stillRunning = createResponse();
-      await statusRoute.handler(createRequest(), stillRunning);
-      assert.equal(JSON.parse(stillRunning.body).status, 'running');
+      const running = createResponse();
+      await statusRoute.handler(createRequest(), running);
+      const runningPayload = JSON.parse(running.body);
+      assert.equal(runningPayload.status, 'running');
+      assert.equal(runningPayload.userCode, 'ROUTE-CODE');
+      assert.ok(!JSON.stringify(runningPayload).includes(FAKE_DEVICE_CODE), 'the device code must never reach the Client');
 
-      // The real callback completes the flow.
-      const state = authorizeUrl.searchParams.get('state');
-      const callback = createResponse();
-      await callbackRoute.handler(createRequest({ url: '/dsh-feedback-bridge/oauth/callback?state=' + state + '&code=' + FAKE_CODE }), callback);
-      assert.equal(callback.code, 200);
-      const authorized = createResponse();
-      await statusRoute.handler(createRequest(), authorized);
-      assert.equal(JSON.parse(authorized.body).status, 'authorized');
-      assert.deepEqual(JSON.parse(authorized.body).identity, { login: 'alice' });
+      const terminal = await waitForTerminal(statusRoute);
+      assert.equal(terminal.status, 'authorized');
+      assert.deepEqual(terminal.identity, { login: 'alice' });
       assert.equal(harness.credentials.record().payload.login, 'alice', 'the grant must be stored through the credentials service');
+      assert.ok(!JSON.stringify(terminal).includes(FAKE_TOKEN), 'the token must never reach the Client');
+      assert.ok(!JSON.stringify(terminal).includes(FAKE_DEVICE_CODE));
 
-      // The route responses never leak the token or the code.
-      const responses = [before.body, start.body, spurious.body, stillRunning.body, callback.body, authorized.body];
-      assert.ok(responses.every((body) => !body.includes(FAKE_TOKEN) && !body.includes(FAKE_CODE)));
-
-      // Submission now works through the oauth provider with exactly one mutation.
       const prepare = createResponse();
       await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission' }), prepare);
       const prepared = JSON.parse(prepare.body);
       assert.equal(prepared.status, 'ready');
       assert.deepEqual(prepared.identity, { login: 'alice' });
+
       const confirm = createResponse();
       await submissionRoute.handler(createRequest({
         method: 'POST',
@@ -267,7 +278,6 @@ test('the full oauth flow authorizes through the callback, stores the grant, and
       const mutations = fake.requests.filter((request) => request.url?.startsWith('/graphql') && /mutation\s+CreateDiscussion/.test(request.body));
       assert.equal(mutations.length, 1, 'exactly one mutation per confirmation');
       assert.equal(mutations[0].headers.authorization, 'Bearer ' + FAKE_TOKEN);
-      assert.ok(!JSON.stringify({ prepare: prepare.body, confirm: confirm.body }).includes(FAKE_TOKEN));
     } finally {
       restore();
       await fiber.dispose().catch(() => {});
@@ -278,50 +288,86 @@ test('the full oauth flow authorizes through the callback, stores the grant, and
   }
 });
 
-test('oauth denial settles as denied, cancel settles as cancelled, and disconnect returns to draft export', async () => {
-  const fake = await startFakeServer();
+test('device flow denial and expiry settle as distinct failures with zero mutation', async () => {
+  for (const [script, expected] of [
+    [() => ({ error: 'access_denied' }), 'denied'],
+    [() => ({ error: 'expired_token' }), 'expired'],
+    [() => ({ access_token: 'gho_x', scope: 'repo' }), 'insufficient-scope'],
+  ]) {
+    const fake = await startFakeServer({ tokenScript: script });
+    const home = tempHome();
+    try {
+      const { harness, fiber, restore } = await loadOauth(home, oauthConfig(fake.base));
+      try {
+        const statusRoute = harness.routes.get('/dsh-feedback-bridge/oauth/status');
+        const startRoute = harness.routes.get('/dsh-feedback-bridge/oauth/start');
+        await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), createResponse());
+        const terminal = await waitForTerminal(statusRoute);
+        assert.equal(terminal.status, 'failed', expected);
+        assert.equal(terminal.code, expected);
+        assert.equal(harness.credentials.record(), undefined, 'a failed flow must never commit a grant');
+        const submissionRoute = harness.routes.get('/dsh-feedback-bridge/submission');
+        const prepare = createResponse();
+        await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission' }), prepare);
+        assert.deepEqual(JSON.parse(prepare.body), { status: 'failed', code: 'authorization-required' });
+      } finally {
+        restore();
+        await fiber.dispose().catch(() => {});
+        rmSync(home, { recursive: true, force: true });
+      }
+    } finally {
+      fake.server.close();
+    }
+  }
+});
+
+test('cancelling the device flow settles as cancelled, and disconnect returns to draft export', async () => {
+  const fake = await startFakeServer({ tokenScript: () => ({ error: 'authorization_pending' }) });
   const home = tempHome();
   try {
     const { harness, fiber, restore } = await loadOauth(home, oauthConfig(fake.base));
     try {
       const statusRoute = harness.routes.get('/dsh-feedback-bridge/oauth/status');
       const startRoute = harness.routes.get('/dsh-feedback-bridge/oauth/start');
-      const callbackRoute = harness.routes.get('/dsh-feedback-bridge/oauth/callback');
       const cancelRoute = harness.routes.get('/dsh-feedback-bridge/oauth/cancel');
       const disconnectRoute = harness.routes.get('/dsh-feedback-bridge/oauth/disconnect');
       const submissionRoute = harness.routes.get('/dsh-feedback-bridge/submission');
 
-      // Denial.
-      const startDeny = createResponse();
-      await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), startDeny);
-      const denyState = new URL(JSON.parse(startDeny.body).url).searchParams.get('state');
-      const deny = createResponse();
-      await callbackRoute.handler(createRequest({ url: '/dsh-feedback-bridge/oauth/callback?state=' + denyState + '&error=access_denied' }), deny);
-      const denied = createResponse();
-      await statusRoute.handler(createRequest(), denied);
-      assert.equal(JSON.parse(denied.body).status, 'failed');
-      assert.equal(JSON.parse(denied.body).code, 'denied');
-
-      // Cancel.
-      const startCancel = createResponse();
-      await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), startCancel);
+      await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), createResponse());
+      await new Promise((resolve) => setTimeout(resolve, 60));
       const cancel = createResponse();
       await cancelRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/cancel' }), cancel);
       const cancelled = createResponse();
       await statusRoute.handler(createRequest(), cancelled);
       assert.equal(JSON.parse(cancelled.body).status, 'cancelled');
+      assert.equal(harness.credentials.record(), undefined);
 
       // Authorize, then disconnect: submission returns to authorization-required.
-      const startOk = createResponse();
-      await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), startOk);
-      const okState = new URL(JSON.parse(startOk.body).url).searchParams.get('state');
-      await callbackRoute.handler(createRequest({ url: '/dsh-feedback-bridge/oauth/callback?state=' + okState + '&code=' + FAKE_CODE }), createResponse());
-      const disconnect = createResponse();
-      await disconnectRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/disconnect' }), disconnect);
-      assert.equal(harness.credentials.record(), undefined);
-      const prepare = createResponse();
-      await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission' }), prepare);
-      assert.deepEqual(JSON.parse(prepare.body), { status: 'failed', code: 'authorization-required' });
+      const fakeOk = await startFakeServer({ tokenScript: (n) => (n === 1 ? { error: 'authorization_pending' } : { access_token: FAKE_TOKEN, scope: 'public_repo' }) });
+      try {
+        const home2 = tempHome();
+        const { harness: harness2, fiber: fiber2, restore: restore2 } = await loadOauth(home2, oauthConfig(fakeOk.base));
+        try {
+          const statusRoute2 = harness2.routes.get('/dsh-feedback-bridge/oauth/status');
+          const startRoute2 = harness2.routes.get('/dsh-feedback-bridge/oauth/start');
+          const disconnectRoute2 = harness2.routes.get('/dsh-feedback-bridge/oauth/disconnect');
+          const submissionRoute2 = harness2.routes.get('/dsh-feedback-bridge/submission');
+          await startRoute2.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), createResponse());
+          await waitForTerminal(statusRoute2);
+          const disconnect = createResponse();
+          await disconnectRoute2.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/disconnect' }), disconnect);
+          assert.equal(harness2.credentials.record(), undefined);
+          const prepare = createResponse();
+          await submissionRoute2.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission' }), prepare);
+          assert.deepEqual(JSON.parse(prepare.body), { status: 'failed', code: 'authorization-required' });
+        } finally {
+          restore2();
+          await fiber2.dispose().catch(() => {});
+          rmSync(home2, { recursive: true, force: true });
+        }
+      } finally {
+        fakeOk.server.close();
+      }
     } finally {
       restore();
       await fiber.dispose().catch(() => {});

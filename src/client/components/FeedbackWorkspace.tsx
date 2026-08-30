@@ -339,14 +339,19 @@ const OAUTH_POLL_MS = 1000;
       .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
   };
 
-  /** Start the oauth PKCE flow and poll the host attempt until it settles. */
+  /** Start the oauth device flow and poll the host attempt until it settles. */
   const startOAuth = () => {
     if (oauthTransport === undefined) return;
     userInteractedRef.current = true;
     oauthTransport.start()
       .then((started) => {
-        setSubmission({ phase: 'authorizing', url: started.url });
-        window.open(started.url, '_blank', 'noopener,noreferrer');
+        setSubmission({
+          phase: 'authorizing',
+          userCode: started.userCode,
+          verificationUri: started.verificationUri,
+        });
+        // Hand off to GitHub's official device authorization page.
+        window.open(started.verificationUri, '_blank', 'noopener,noreferrer');
         const timer = window.setInterval(() => {
           oauthTransport.status()
             .then((oauth) => {
@@ -369,6 +374,13 @@ const OAUTH_POLL_MS = 1000;
         }, OAUTH_POLL_MS);
       })
       .catch(() => setSubmission({ phase: 'oauth-failed', code: 'network' }));
+  };
+
+  /** Copy the device flow user code to the clipboard; never a secret. */
+  const copyOAuthCode = (code: string) => {
+    copyMarkdown(code)
+      .then(() => setNotice('copied'))
+      .catch(() => setNotice('copyFailed'));
   };
 
   /** Withdraw the running oauth attempt. */
@@ -1007,6 +1019,7 @@ const OAUTH_POLL_MS = 1000;
               onStartOAuth={startOAuth}
               onCancelOAuth={cancelOAuth}
               onRetryOAuth={retryOAuth}
+              onCopyCode={copyOAuthCode}
               onDisconnect={disconnectOAuth}
               onBack={closeSubmission}
               onExport={handleExport}

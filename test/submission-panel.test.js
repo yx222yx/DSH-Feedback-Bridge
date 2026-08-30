@@ -198,14 +198,25 @@ test('SubmitPanel offers a sign-in step with the credentials-provider disclosure
 });
 
 test('SubmitPanel shows the browser-handoff status with cancel while authorizing', () => {
-  const { html } = renderPanel({ phase: 'authorizing', url: 'https://github.com/login/oauth/authorize?state=x' });
+  const { html } = renderPanel({ phase: 'authorizing', userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device' });
   assert.match(html, /data-testid="dsh-feedback-submission-oauth-authorizing"/);
+  assert.match(html, /ABCD-1234/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-copy-code"/);
   assert.match(html, /data-testid="dsh-feedback-submission-oauth-open"/);
   assert.match(html, /data-testid="dsh-feedback-submission-oauth-cancel"/);
 });
 
-test('SubmitPanel explains each oauth failure class with retry and the export fallback', () => {
-  const codes = ['denied', 'state-expired', 'exchange-failed', 'user-failed', 'network'];
+test('SubmitPanel shows the device user code with a copy action and the official verification link while authorizing', () => {
+  const { html } = renderPanel({ phase: 'authorizing', userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device' });
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-authorizing"/);
+  assert.match(html, /ABCD-1234/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-copy-code"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-open"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-cancel"/);
+});
+
+test('SubmitPanel explains each device flow failure class with retry and the export fallback', () => {
+  const codes = ['denied', 'expired', 'insufficient-scope', 'exchange-failed', 'network'];
   for (const code of codes) {
     const { html } = renderPanel({ phase: 'oauth-failed', code }, { onRetryOAuth() {} });
     assert.match(html, /data-testid="dsh-feedback-submission-oauth-failed"/, code);

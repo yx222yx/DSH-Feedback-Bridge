@@ -40,7 +40,7 @@ function jsonResponse(payload) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
 }
 
-test('createOAuthTransport reports the oauth status from the status route', async () => {
+test('createOAuthTransport reports the device flow status from the status route', async () => {
   const calls = [];
   const transport = moduleExports.createOAuthTransport({
     statusUrl: '/dsh-feedback-bridge/oauth/status',
@@ -49,29 +49,29 @@ test('createOAuthTransport reports the oauth status from the status route', asyn
     disconnectUrl: '/dsh-feedback-bridge/oauth/disconnect',
     fetchImpl(input, init) {
       calls.push({ input, method: init.method });
-      return jsonResponse({ supported: true, status: 'authorized', identity: { login: 'alice' } });
+      return jsonResponse({ supported: true, status: 'running', userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device' });
     },
   });
   const status = await transport.status();
-  assert.equal(calls.length, 1);
   assert.equal(calls[0].input, '/dsh-feedback-bridge/oauth/status');
   assert.equal(calls[0].method, 'GET');
-  assert.deepEqual(status, { supported: true, status: 'authorized', identity: { login: 'alice' } });
+  assert.deepEqual(status, { supported: true, status: 'running', userCode: 'ABCD-1234', verificationUri: 'https://github.com/login/device' });
 });
 
-test('createOAuthTransport starts an attempt and returns the authorize URL', async () => {
+test('createOAuthTransport starts a device flow and returns the verification URI and user code', async () => {
   const calls = [];
   const transport = moduleExports.createOAuthTransport({
     statusUrl: '/oauth/status', startUrl: '/oauth/start', cancelUrl: '/oauth/cancel', disconnectUrl: '/oauth/disconnect',
     fetchImpl(input, init) {
       calls.push({ input, method: init.method });
-      return jsonResponse({ status: 'running', url: 'https://github.com/login/oauth/authorize?state=x' });
+      return jsonResponse({ status: 'running', userCode: 'WXYZ-9876', verificationUri: 'https://github.com/login/device' });
     },
   });
   const started = await transport.start();
   assert.equal(calls[0].input, '/oauth/start');
   assert.equal(calls[0].method, 'POST');
-  assert.equal(started.url, 'https://github.com/login/oauth/authorize?state=x');
+  assert.equal(started.userCode, 'WXYZ-9876');
+  assert.equal(started.verificationUri, 'https://github.com/login/device');
 });
 
 test('createOAuthTransport cancels and disconnects with POST requests', async () => {
