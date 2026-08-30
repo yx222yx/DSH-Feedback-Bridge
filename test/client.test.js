@@ -113,7 +113,7 @@ test('client plugin declares locale and slots dependencies and registers the set
   };
 
   assert.equal(moduleExports.name, 'dsh-feedback-bridge');
-  assert.deepEqual(moduleExports.inject, ['slots', 'locale']);
+  assert.deepEqual(moduleExports.inject, ['slots', 'locale', 'sessions']);
 
   moduleExports.apply(ctx);
 
@@ -172,6 +172,19 @@ test('client slot registration is disposed when the owning fiber unloads', async
   await root.plugin(function provideClientServices(ctx) {
     ctx.provide('slots', slots);
     ctx.provide('locale', locale);
+    ctx.provide('sessions', {
+      list: {
+        getSnapshot() {
+          return { ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {} };
+        },
+        subscribe() {
+          return () => {};
+        },
+      },
+      binding() {
+        return undefined;
+      },
+    });
   });
 
   const fiber = root.plugin(moduleExports);

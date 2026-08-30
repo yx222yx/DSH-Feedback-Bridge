@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Context } from '@deepseek-ai/cordis';
 import { apply, inject, name } from '../lib/index.js';
-import { draftFilePath, load } from '../lib/draft-store.js';
+import { draftFilePath, load, DRAFT_SCHEMA_VERSION, MAX_SOURCES } from '../lib/draft-store.js';
 
 function createHarness(dshHome) {
   const routes = new Map();
@@ -117,8 +117,9 @@ test('POST save persists the draft and GET returns the stored record', async () 
     assert.deepEqual(JSON.parse(saveResponse.body), { ok: true });
 
     const stored = await load(draftFilePath());
-    assert.equal(stored.version, 1);
+    assert.equal(stored.version, DRAFT_SCHEMA_VERSION);
     assert.equal(stored.title, '标题');
+    assert.deepEqual(stored.sources, []);
     assert.equal(typeof stored.updatedAt, 'string');
 
     const readResponse = createResponse();
@@ -149,6 +150,74 @@ test('POST remove deletes the draft and is idempotent', async () => {
     const secondRemove = createResponse();
     await route.handler(createRequest({ method: 'POST', body: JSON.stringify({ action: 'remove' }) }), secondRemove);
     assert.equal(secondRemove.code, 200);
+  } finally {
+    restore();
+    await fiber.dispose().catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+
+function sampleSource(overrides = {}) {
+  return {
+    id: 'session-1:user:3',
+    sessionId: 'session-1',
+    kind: 'message',
+    role: 'user',
+    label: '用户消息',
+    text: 'SENTINEL_CONFIRMED',
+    truncated: false,
+    sensitive: false,
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('POST save persists confirmed sources and GET returns them', async () => {
+  const home = tempHome();
+  const harness = createHarness(home);
+  const { fiber, restore } = await harness.load();
+  try {
+    const route = harness.routes.get('/dsh-feedback-bridge/draft');
+    const sources = [sampleSource(), sampleSource({ id: 'session-1:tool:9', kind: 'tool-result', role: 'tool' })];
+    const saveResponse = createResponse();
+    await route.handler(createRequest({
+      method: 'POST',
+      body: JSON.stringify({ action: 'save', draft: { ...sampleDraft(), sources } }),
+    }), saveResponse);
+    assert.equal(saveResponse.code, 200);
+
+    const stored = await load(draftFilePath());
+    assert.deepEqual(stored.sources, sources);
+
+    const readResponse = createResponse();
+    await route.handler(createRequest({ method: 'GET' }), readResponse);
+    assert.deepEqual(JSON.parse(readResponse.body).draft.sources, sources);
+  } finally {
+    restore();
+    await fiber.dispose().catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('the draft route rejects drafts with invalid sources with 400 and persists nothing', async () => {
+  const home = tempHome();
+  const harness = createHarness(home);
+  const { fiber, restore } = await harness.load();
+  try {
+    const route = harness.routes.get('/dsh-feedback-bridge/draft');
+    const invalidBodies = [
+      { action: 'save', draft: { ...sampleDraft(), sources: 'nope' } },
+      { action: 'save', draft: { ...sampleDraft(), sources: [sampleSource({ role: 'admin' })] } },
+      { action: 'save', draft: { ...sampleDraft(), sources: Array.from({ length: MAX_SOURCES + 1 }, (_, i) => sampleSource({ id: 's:' + i })) } },
+      { action: 'save', draft: { ...sampleDraft(), sources: [{ id: 'broken' }] } },
+    ];
+    for (const body of invalidBodies) {
+      const response = createResponse();
+      await route.handler(createRequest({ method: 'POST', body: JSON.stringify(body) }), response);
+      assert.equal(response.code, 400, JSON.stringify(body).slice(0, 120));
+    }
+    assert.equal(await load(draftFilePath()), null);
   } finally {
     restore();
     await fiber.dispose().catch(() => {});

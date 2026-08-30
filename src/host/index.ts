@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
-import { draftFilePath, load, remove, save, type DraftFields } from './draft-store.js';
+import { draftFilePath, load, remove, save, validateSources, type ConfirmedSourceRecord, type DraftFields } from './draft-store.js';
 
 const name = 'dsh-feedback-bridge';
 const inject = ['webServer'];
@@ -321,15 +321,16 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-/** A validated draft write: remove, or save with exactly five string fields. */
+/** A validated draft write: remove, or save with five string fields plus confirmed sources. */
 type DraftWrite =
   | { action: 'remove'; draft: null }
-  | { action: 'save'; draft: DraftFields };
+  | { action: 'save'; draft: DraftFields & { sources: ConfirmedSourceRecord[] } };
 
 /**
  * Validate a draft write body: an object with action `save` (plus exactly
- * the five string fields) or action `remove`. Anything else is rejected so
- * unexpected actions and shapes fail loud at the wire boundary.
+ * the five string fields and an optional validated sources array) or action
+ * `remove`. Anything else is rejected so unexpected actions and shapes fail
+ * loud at the wire boundary.
  *
  * @param body - parsed request body.
  * @returns the validated action and draft fields.
@@ -342,21 +343,23 @@ function parseDraftWrite(body: unknown): DraftWrite {
   const record = body as Record<string, unknown>;
   if (record.action === 'remove') return { action: 'remove', draft: null };
   if (record.action !== 'save') {
-    throw new Error(`unsupported action: ${String(record.action)}`);
+    throw new Error('unsupported action: ' + String(record.action));
   }
   const draft = record.draft;
   if (draft === null || typeof draft !== 'object' || Array.isArray(draft)) {
     throw new Error('draft must be an object');
   }
   const expected = ['title', 'scenario', 'gap', 'desired', 'context'];
+  const allowed = [...expected, 'sources'];
   const keys = Object.keys(draft);
   if (
-    keys.length !== expected.length
+    keys.some((key) => !allowed.includes(key))
     || expected.some((key) => !(key in draft) || typeof (draft as Record<string, unknown>)[key] !== 'string')
   ) {
     throw new Error('draft must contain exactly the five string fields: title, scenario, gap, desired, context');
   }
-  return { action: 'save', draft: draft as DraftFields };
+  const sources = 'sources' in draft ? validateSources((draft as Record<string, unknown>).sources) : [];
+  return { action: 'save', draft: { ...(draft as DraftFields), sources } };
 }
 
 /**
@@ -399,7 +402,7 @@ async function handleDraftRequest(request: IncomingMessage, response: ServerResp
       if (parsed.action === 'remove') {
         await remove(filePath);
       } else {
-        await save(filePath, parsed.draft);
+        await save(filePath, parsed.draft, parsed.draft.sources);
       }
       writeJson(response, 200, { ok: true });
     } catch {

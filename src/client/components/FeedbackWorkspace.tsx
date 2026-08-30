@@ -1,8 +1,19 @@
 import React from 'react';
 import { OFFICIAL_DISCUSSIONS_URL } from '../constants.js';
+import { statusUrl } from '../env.js';
 import { buildDraftMarkdown, feedbackDraftFileName } from '../session.js';
+import {
+  applyRecommendations,
+  confirmSourceCandidate,
+  deriveSourceCandidates,
+  quoteSourceText,
+  removeSource,
+} from '../sources.js';
+import type { ConfirmedSourceRecord, FeedbackSourceCandidate } from '../sources.js';
+import type { ConversationRead, ConversationSource } from '../conversation.js';
 import type {
   DraftPersistence,
+  FeedbackBridgeKey,
   FeedbackDraft,
   FeedbackDraftFields,
   FeedbackFieldKey,
@@ -11,6 +22,7 @@ import type {
   WorkspaceNotice,
 } from '../types.js';
 import { NOTICE_STATUS } from '../types.js';
+import { SourcePanel } from './SourcePanel.js';
 
 /** Debounce window before an edit triggers an autosave, in milliseconds. */
 const AUTOSAVE_DELAY_MS = 600;
@@ -20,7 +32,30 @@ export interface FeedbackWorkspaceProps {
   t: T;
   sessions: FeedbackSessionController;
   persistence: DraftPersistence;
+  /** Current-conversation source from `ctx.sessions`; null without a session service. */
+  conversation: ConversationSource | null;
   onClose: () => void;
+}
+
+/**
+ * Read the current conversation through the injected source. The initial
+ * render uses the server snapshot so SSR-safe DOM tests see candidates
+ * without running effects; the browser subscribes and updates on change.
+ *
+ * @param source - the conversation source, or null outside a session.
+ * @returns the current read, or undefined when no session is open.
+ */
+function useConversationRead(source: ConversationSource | null | undefined): ConversationRead | undefined {
+  const [read, setRead] = React.useState<ConversationRead | undefined>(() => (
+    source === null || source === undefined ? undefined : source.getServerSnapshot()
+  ));
+  React.useEffect(() => {
+    if (source === null || source === undefined) return undefined;
+    const update = () => setRead(source.getSnapshot());
+    update();
+    return source.subscribe(update);
+  }, [source]);
+  return read;
 }
 
 /**
@@ -32,14 +67,29 @@ export interface FeedbackWorkspaceProps {
  * any pending save, and cancel asks for a confirmation before discarding.
  * No action here performs a GitHub write or any external network request.
  */
-export function FeedbackWorkspace({ t, sessions, persistence, onClose }: FeedbackWorkspaceProps): React.ReactElement {
+export function FeedbackWorkspace({ t, sessions, persistence, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
+  const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
   const [notice, setNotice] = React.useState<WorkspaceNotice | null>(null);
   const [confirmDiscard, setConfirmDiscard] = React.useState(false);
+  const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [dshVersion, setDshVersion] = React.useState<string | null>(null);
   const savedRef = React.useRef<string | null>(null);
   const timerRef = React.useRef<number | null>(null);
   const fieldsRef = React.useRef(fields);
   fieldsRef.current = fields;
+  const sourcesRef = React.useRef(sources);
+  sourcesRef.current = sources;
+  const conversationRead = useConversationRead(conversation);
+  const candidates: FeedbackSourceCandidate[] = conversationRead === undefined
+    ? []
+    : applyRecommendations(deriveSourceCandidates(conversationRead.snapshot, {
+        sessionId: conversationRead.sessionId,
+        title: conversationRead.meta.title,
+        cwd: conversationRead.meta.cwd,
+        agentPreset: conversationRead.meta.agentPreset,
+        dshVersion,
+      }));
   const headings = {
     scenario: t('field.scenario'),
     gap: t('field.gap'),
@@ -66,14 +116,16 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
         if (persisted !== null) {
           const resumed: FeedbackDraft = {
             type: 'custom',
-            title: persisted.title ?? '',
-            scenario: persisted.scenario ?? '',
-            gap: persisted.gap ?? '',
-            desired: persisted.desired ?? '',
-            context: persisted.context ?? '',
+            title: persisted.fields.title ?? '',
+            scenario: persisted.fields.scenario ?? '',
+            gap: persisted.fields.gap ?? '',
+            desired: persisted.fields.desired ?? '',
+            context: persisted.fields.context ?? '',
           };
           setFields(resumed);
+          setSources(persisted.sources);
           sessions.restore(resumed);
+          sessions.setSources(persisted.sources);
           markSaved(resumed);
           setNotice('restored');
         } else {
@@ -88,6 +140,65 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
     };
   }, []);
 
+  // Read the host DSH version once for the diagnostics candidate; the
+  // status route is same-origin and never carries draft content.
+  React.useEffect(() => {
+    let cancelled = false;
+    fetch(statusUrl())
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error('status ' + response.status))))
+      .then((data) => {
+        if (!cancelled && typeof (data as { dshVersion?: unknown }).dshVersion === 'string') {
+          setDshVersion((data as { dshVersion: string }).dshVersion);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Toggle one source row between preview and full text. */
+  const toggleExpand = (id: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  /** Confirm a candidate: capture the reviewed snapshot and persist it. */
+  const handleConfirm = (candidate: FeedbackSourceCandidate) => {
+    const label = t(('sources.role.' + candidate.role) as FeedbackBridgeKey);
+    const record = confirmSourceCandidate(candidate, new Date().toISOString(), label);
+    const next = [...sourcesRef.current, record];
+    setSources(next);
+    sessions.setSources(next);
+    scheduleAutosave(fieldsRef.current);
+  };
+
+  /** Remove a confirmed source; it immediately stops feeding draft prep. */
+  const handleRemove = (id: string) => {
+    const next = removeSource(sourcesRef.current, id);
+    setSources(next);
+    sessions.setSources(next);
+    scheduleAutosave(fieldsRef.current);
+  };
+
+  /** Quote a confirmed source's reviewed snapshot into one public field. */
+  const handleQuote = (id: string, fieldKey: FeedbackFieldKey) => {
+    const record = sourcesRef.current.find((source) => source.id === id);
+    if (record === undefined) return;
+    const quoted = quoteSourceText(record).trim();
+    if (quoted === '') return;
+    const current = String(fieldsRef.current[fieldKey] ?? '').trim();
+    const separator = current === '' ? '' : '\n\n';
+    const next = { ...fieldsRef.current, [fieldKey]: current + separator + quoted };
+    setFields(next);
+    sessions.update({ [fieldKey]: next[fieldKey] });
+    scheduleAutosave(next);
+  };
+
   /** Debounced autosave; a failed save surfaces the failure notice. */
   const scheduleAutosave = (nextFields: FeedbackDraft) => {
     if (timerRef.current !== null && window.clearTimeout !== undefined) {
@@ -95,7 +206,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
     }
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
-      persistence.save(nextFields)
+      persistence.save(nextFields, sourcesRef.current)
         .then((saved) => {
           if (saved) {
             markSaved(nextFields);
@@ -118,7 +229,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
       window.clearTimeout(timerRef.current);
     }
     timerRef.current = null;
-    persistence.save(fields)
+    persistence.save(fields, sourcesRef.current)
       .then(() => onClose())
       .catch(() => setNotice('autosaveFailed'));
   };
@@ -143,7 +254,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
   // semantics and only fires while a draft is open.
   React.useEffect(() => {
     const onUnload = () => {
-      if (fieldsRef.current !== null) persistence.keepalive(fieldsRef.current);
+      if (fieldsRef.current !== null) persistence.keepalive(fieldsRef.current, sourcesRef.current);
     };
     if (window.addEventListener !== undefined) {
       window.addEventListener('beforeunload', onUnload);
@@ -241,6 +352,19 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
           </button>
         </header>
         <div className="dsh-feedback-body">
+          <SourcePanel
+            t={t}
+            candidates={candidates}
+            confirmed={sources}
+            expanded={expanded}
+            noSession={conversationRead === undefined}
+            currentSessionId={conversationRead?.sessionId ?? null}
+            onToggleExpand={toggleExpand}
+            onConfirm={handleConfirm}
+            onRemove={handleRemove}
+            onQuote={handleQuote}
+          />
+          <div className="dsh-feedback-edit-row">
           <form className="dsh-feedback-form" onSubmit={(event) => event.preventDefault()}>
             <label className="dsh-feedback-field" htmlFor="dsh-feedback-title">
               <span className="dsh-feedback-field-label">{t('field.title')}</span>
@@ -267,6 +391,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, onClose }: Feedbac
             <h3 className="dsh-feedback-section-title">{t('preview.title')}</h3>
             <pre className="dsh-feedback-preview" data-testid="dsh-feedback-preview">{markdown}</pre>
           </section>
+          </div>
         </div>
         <footer className="dsh-feedback-footer">
           <div className="dsh-feedback-actions">

@@ -4,6 +4,19 @@ import { test } from 'node:test';
 
 const clientBundle = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
 
+const React = {
+  createElement() {
+    return { type: null, props: {}, children: [] };
+  },
+  useState(initial) {
+    return [initial, () => {}];
+  },
+  useEffect() {},
+  useRef(initial) {
+    return { current: initial };
+  },
+};
+
 function loadClientExports() {
   let registration;
   const window = {
@@ -17,22 +30,9 @@ function loadClientExports() {
   assert.ok(registration);
   return registration.factory((specifier) => {
     if (specifier === 'react') return React;
-    throw new Error(`unexpected client require: ${specifier}`);
+    throw new Error('unexpected client require: ' + specifier);
   });
 }
-
-const React = {
-  createElement() {
-    return { type: null, props: {}, children: [] };
-  },
-  useState(initial) {
-    return [initial, () => {}];
-  },
-  useEffect() {},
-  useRef(initial) {
-    return { current: initial };
-  },
-};
 
 function createFakeFetch({ failSaveTimes = 0, failRemove = false } = {}) {
   const log = [];
@@ -60,7 +60,7 @@ function createFakeFetch({ failSaveTimes = 0, failRemove = false } = {}) {
           return { ok: true, json: async () => ({ ok: true }) };
         }
       }
-      throw new Error(`unexpected ${init.method} ${url}`);
+      throw new Error('unexpected ' + init.method + ' ' + url);
     },
   };
 }
@@ -69,30 +69,55 @@ function fields() {
   return { title: '标题', scenario: '场景', gap: '', desired: '期望', context: '' };
 }
 
-test('save posts exactly the five draft fields without type or version envelopes', async () => {
+function sampleSource(overrides = {}) {
+  return {
+    id: 'session-1:user:3',
+    sessionId: 'session-1',
+    kind: 'message',
+    role: 'user',
+    label: '用户消息',
+    text: 'SENTINEL_CONFIRMED',
+    truncated: false,
+    sensitive: false,
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('save posts exactly the five draft fields plus the confirmed sources', async () => {
   const moduleExports = loadClientExports();
   const fake = createFakeFetch();
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
-  assert.equal(await persistence.save({ ...fields(), type: 'custom', version: 99 }), true);
+  const sources = [sampleSource()];
+  assert.equal(await persistence.save({ ...fields(), type: 'custom', version: 99 }, sources), true);
   assert.equal(fake.log.length, 1);
   assert.equal(fake.log[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(fake.log[0].init.body), { action: 'save', draft: { ...fields(), sources } });
+});
+
+test('save omits the sources key when no sources are confirmed', async () => {
+  const moduleExports = loadClientExports();
+  const fake = createFakeFetch();
+  const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
+  assert.equal(await persistence.save(fields(), []), true);
   assert.deepEqual(JSON.parse(fake.log[0].init.body), { action: 'save', draft: fields() });
 });
 
-test('load resolves the persisted draft from a GET and null when empty', async () => {
+test('load resolves fields and sources from a GET and null when empty', async () => {
   const moduleExports = loadClientExports();
   const fake = createFakeFetch();
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
   assert.equal(await persistence.load(), null);
-  await persistence.save(fields());
-  assert.deepEqual(await persistence.load(), fields());
+  const sources = [sampleSource()];
+  await persistence.save(fields(), sources);
+  assert.deepEqual(await persistence.load(), { fields: fields(), sources });
 });
 
 test('remove posts the remove action and subsequent loads resolve null', async () => {
   const moduleExports = loadClientExports();
   const fake = createFakeFetch();
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
-  await persistence.save(fields());
+  await persistence.save(fields(), []);
   assert.equal(await persistence.remove(), true);
   assert.deepEqual(JSON.parse(fake.log[1].init.body), { action: 'remove' });
   assert.equal(await persistence.load(), null);
@@ -111,8 +136,8 @@ test('writes are serialized in call order', async () => {
   };
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl });
 
-  const first = persistence.save({ ...fields(), title: '第一版' });
-  const second = persistence.save({ ...fields(), title: '第二版' });
+  const first = persistence.save({ ...fields(), title: '第一版' }, []);
+  const second = persistence.save({ ...fields(), title: '第二版' }, []);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(log.length, 1); // the second write waits behind the first
 
@@ -137,8 +162,8 @@ test('the queue keeps working after a save failure: a later save and remove succ
   const fake = createFakeFetch({ failSaveTimes: 1 });
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
 
-  await assert.rejects(() => persistence.save(fields()), /save boom/);
-  assert.equal(await persistence.save({ ...fields(), title: '重试' }), true);
+  await assert.rejects(() => persistence.save(fields(), []), /save boom/);
+  assert.equal(await persistence.save({ ...fields(), title: '重试' }, []), true);
   assert.equal(await persistence.remove(), true);
   assert.equal(fake.log.length, 3);
 });
@@ -149,7 +174,7 @@ test('a save scheduled before a discard is skipped once the discard bumps the ge
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
 
   // A stale save is enqueued first, then the discard bumps the generation.
-  const stale = persistence.save({ ...fields(), title: '会迟到的保存' });
+  const stale = persistence.save({ ...fields(), title: '会迟到的保存' }, []);
   const removed = persistence.remove();
   await Promise.all([stale, removed]);
 
@@ -166,25 +191,25 @@ test('the generation bumps on each remove and a later save still succeeds', asyn
   assert.equal(persistence.generation(), 0);
   await persistence.remove();
   assert.equal(persistence.generation(), 1);
-  assert.equal(await persistence.save(fields()), true);
+  assert.equal(await persistence.save(fields(), []), true);
   assert.equal(fake.log.length, 2);
 });
 
-test('keepalive posts with keepalive flag and swallows failures', async () => {
+test('keepalive posts fields and sources with the keepalive flag and swallows failures', async () => {
   const moduleExports = loadClientExports();
   const fake = createFakeFetch({ failSaveTimes: 1 });
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
 
-  persistence.keepalive(fields());
+  persistence.keepalive(fields(), [sampleSource()]);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(fake.log.length, 1);
   assert.equal(fake.log[0].init.keepalive, true);
-  assert.deepEqual(JSON.parse(fake.log[0].init.body), { action: 'save', draft: fields() });
+  assert.deepEqual(JSON.parse(fake.log[0].init.body), { action: 'save', draft: { ...fields(), sources: [sampleSource()] } });
 
   // A failing keepalive must not throw or reject.
   const failing = createFakeFetch({ failSaveTimes: 1 });
   const persistence2 = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: failing.fetch });
-  persistence2.keepalive(fields());
+  persistence2.keepalive(fields(), []);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(failing.log.length, 1);
 });
@@ -193,7 +218,7 @@ test('keepalive does nothing for a null draft', async () => {
   const moduleExports = loadClientExports();
   const fake = createFakeFetch();
   const persistence = moduleExports.createDraftPersistence({ draftUrl: '/draft', fetchImpl: fake.fetch });
-  persistence.keepalive(null);
+  persistence.keepalive(null, []);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(fake.log.length, 0);
 });

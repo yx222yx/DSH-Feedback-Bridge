@@ -1,16 +1,32 @@
 import React from 'react';
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import type { ClientContext, ISessions } from '@deepseek-ai/dsh-client-runtime/client';
 import { NS, OFFICIAL_DISCUSSIONS_URL } from './constants.js';
+import { createConversationSource } from './conversation.js';
+import type { ConversationSource } from './conversation.js';
 import { dictionaries } from './dictionaries.js';
 import { draftUrl } from './env.js';
 import { injectStyles } from './styles.js';
 import { createFeedbackSessionController } from './session.js';
 import { createDraftPersistence } from './persistence.js';
+import {
+  applyRecommendations,
+  captureSourceText,
+  confirmSourceCandidate,
+  deriveSourceCandidates,
+  quoteSourceText,
+  removeSource,
+  sensitiveMarkerHit,
+  sourcePreview,
+  utf8ByteLength,
+  MAX_CANDIDATES,
+  SOURCE_CAPTURE_CAP,
+  SOURCE_PREVIEW_CHARS,
+} from './sources.js';
 import { FeedbackTrigger } from './components/FeedbackTrigger.js';
 import { StatusSection } from './components/StatusSection.js';
 
 const name = 'dsh-feedback-bridge';
-const inject = ['slots', 'locale'];
+const inject = ['slots', 'locale', 'sessions'];
 export { name, inject };
 export { OFFICIAL_DISCUSSIONS_URL } from './constants.js';
 export { dictionaries } from './dictionaries.js';
@@ -23,6 +39,28 @@ export {
 export { createDraftPersistence } from './persistence.js';
 export { FeedbackTrigger } from './components/FeedbackTrigger.js';
 export { FeedbackWorkspace } from './components/FeedbackWorkspace.js';
+export {
+  applyRecommendations,
+  captureSourceText,
+  confirmSourceCandidate,
+  deriveSourceCandidates,
+  quoteSourceText,
+  removeSource,
+  sensitiveMarkerHit,
+  sourcePreview,
+  utf8ByteLength,
+  MAX_CANDIDATES,
+  SOURCE_CAPTURE_CAP,
+  SOURCE_PREVIEW_CHARS,
+} from './sources.js';
+export type {
+  ConfirmedSourceRecord,
+  FeedbackSourceCandidate,
+  SourceDerivationContext,
+  SourceKind,
+  SourceRole,
+  SourceStatus,
+} from './sources.js';
 
 /**
  * Client plugin entry point. The DSH Web shell provides `slots` and
@@ -41,6 +79,12 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS);
   const sessions = createFeedbackSessionController();
   const persistence = createDraftPersistence({ draftUrl: draftUrl() });
+  // The current-conversation read rides the official `ctx.sessions` face;
+  // test compositions without the sessions service degrade to no-session.
+  const sessionsService = (ctx as { sessions?: ISessions }).sessions;
+  const conversation: ConversationSource | null = sessionsService === undefined
+    ? null
+    : createConversationSource(sessionsService);
   ctx.effect(() => {
     const disposers = [
       ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
@@ -48,7 +92,7 @@ export function apply(ctx: ClientContext): void {
         id: 'dsh-feedback-bridge',
         locale: NS,
       }, (props) => (
-        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} />
+        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} conversation={conversation} />
       ))),
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',

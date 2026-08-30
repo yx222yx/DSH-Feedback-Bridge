@@ -1,4 +1,5 @@
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
+import type { ConfirmedSourceRecord } from './sources.js';
 
 /** Dictionary key union of the plugin's locale namespace. */
 export type FeedbackBridgeKey =
@@ -40,7 +41,35 @@ export type FeedbackBridgeKey =
   | 'guidance.step1'
   | 'guidance.step2'
   | 'guidance.step3'
-  | 'guidance.step4';
+  | 'guidance.step4'
+  | 'sources.title'
+  | 'sources.candidates'
+  | 'sources.confirmed'
+  | 'sources.empty'
+  | 'sources.noSession'
+  | 'sources.recommended'
+  | 'sources.sensitive'
+  | 'sources.confirm'
+  | 'sources.confirmedState'
+  | 'sources.remove'
+  | 'sources.expand'
+  | 'sources.collapse'
+  | 'sources.quotePlaceholder'
+  | 'sources.truncated'
+  | 'sources.otherSession'
+  | 'sources.noneConfirmed'
+  | 'sources.role.user'
+  | 'sources.role.assistant'
+  | 'sources.role.steering'
+  | 'sources.role.context'
+  | 'sources.role.tool'
+  | 'sources.role.error'
+  | 'sources.role.session'
+  | 'sources.reason.recent'
+  | 'sources.reason.error'
+  | 'sources.reason.tool-error'
+  | 'sources.reason.turn-error'
+  | 'sources.reason.session';
 
 /** Namespace-bound translate function delivered by the locale service. */
 export type T = TranslateNS<'dsh-feedback-bridge'>;
@@ -66,7 +95,11 @@ export interface FeedbackSessionController {
   update(patch: Partial<FeedbackDraftFields>): void;
   /** Replace the in-memory draft with a restored persisted one. */
   restore(persisted: FeedbackDraft): void;
-  /** Discard the in-memory draft (cancellation). */
+  /** Current confirmed sources. */
+  getSources(): ConfirmedSourceRecord[];
+  /** Replace the confirmed sources (restore or discard). */
+  setSources(sources: ConfirmedSourceRecord[]): void;
+  /** Discard the in-memory draft and sources (cancellation). */
   cancel(): void;
   /** Plugin-unload cleanup: drop the draft and any references. */
   dispose(): void;
@@ -90,18 +123,24 @@ export interface FetchInitLike {
 /** fetch-like function; defaults to the global fetch in the browser. */
 export type FetchLike = (input: string, init?: FetchInitLike) => Promise<FetchResponseLike>;
 
+/** A restored persisted draft: the five public fields plus confirmed sources. */
+export interface PersistedFeedbackDraft {
+  fields: FeedbackDraftFields;
+  sources: ConfirmedSourceRecord[];
+}
+
 /** Serialized draft transport handle owned by the Client plugin. */
 export interface DraftPersistence {
   /** Current generation; bumped on every remove. */
   generation(): number;
-  /** Read the persisted draft, or null when none exists. */
-  load(): Promise<FeedbackDraftFields | null>;
-  /** Persist the five draft fields; resolves false when a discard happened first. */
-  save(draft: FeedbackDraftFields): Promise<boolean>;
+  /** Read the persisted draft (fields plus confirmed sources), or null when none exists. */
+  load(): Promise<PersistedFeedbackDraft | null>;
+  /** Persist the five draft fields and the confirmed sources; resolves false when a discard happened first. */
+  save(draft: FeedbackDraftFields, sources: readonly ConfirmedSourceRecord[]): Promise<boolean>;
   /** Delete the persisted draft. */
   remove(): Promise<boolean>;
   /** Best-effort unload fallback; never carries success semantics. */
-  keepalive(draft: FeedbackDraftFields | null): void;
+  keepalive(draft: FeedbackDraftFields | null, sources: readonly ConfirmedSourceRecord[]): void;
 }
 
 /** Host status payload served to the Client. */

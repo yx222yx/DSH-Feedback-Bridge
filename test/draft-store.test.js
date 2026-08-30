@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { load, remove, save, resolveDshHome, draftFilePath, DRAFT_SCHEMA_VERSION } from '../lib/draft-store.js';
+import { load, remove, save, resolveDshHome, draftFilePath, DRAFT_SCHEMA_VERSION, MAX_SOURCES, MAX_SOURCE_TEXT } from '../lib/draft-store.js';
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-store-'));
@@ -13,14 +13,29 @@ function sampleDraft(overrides = {}) {
   return { title: '标题', scenario: '场景', gap: '缺口', desired: '期望', context: '上下文', ...overrides };
 }
 
-test('save writes the minimal record with schema version and updatedAt, load round-trips it', async () => {
+function sampleSource(overrides = {}) {
+  return {
+    id: 'session-1:user:3',
+    sessionId: 'session-1',
+    kind: 'message',
+    role: 'user',
+    label: '用户消息',
+    text: 'SENTINEL_CONFIRMED',
+    truncated: false,
+    sensitive: false,
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('save writes the minimal v2 record (five fields, empty sources, version, updatedAt) and load round-trips it', async () => {
   const dir = tempDir();
   try {
     const filePath = join(dir, 'draft.json');
     const saved = await save(filePath, sampleDraft());
     assert.equal(saved.version, DRAFT_SCHEMA_VERSION);
     assert.equal(typeof saved.updatedAt, 'string');
-    assert.deepEqual(Object.keys(saved).sort(), ['context', 'desired', 'gap', 'scenario', 'title', 'updatedAt', 'version']);
+    assert.deepEqual(Object.keys(saved).sort(), ['context', 'desired', 'gap', 'scenario', 'sources', 'title', 'updatedAt', 'version']);
 
     const loaded = await load(filePath);
     assert.deepEqual(loaded, {
@@ -30,8 +45,34 @@ test('save writes the minimal record with schema version and updatedAt, load rou
       gap: '缺口',
       desired: '期望',
       context: '上下文',
+      sources: [],
       updatedAt: saved.updatedAt,
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('save persists confirmed sources and load round-trips them verbatim', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const sources = [
+      sampleSource(),
+      sampleSource({
+        id: 'session-1:tool:call-9',
+        kind: 'tool-result',
+        role: 'tool',
+        label: '工具输出：bash',
+        text: 'SENTINEL_DIAG_RAW',
+        sensitive: true,
+      }),
+    ];
+    const saved = await save(filePath, sampleDraft({ title: '带来源' }), sources);
+    assert.deepEqual(saved.sources, sources);
+    const loaded = await load(filePath);
+    assert.equal(loaded.title, '带来源');
+    assert.deepEqual(loaded.sources, sources);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -133,6 +174,118 @@ test('save rejects a draft whose fields are not all strings', async () => {
     await assert.rejects(() => save(filePath, { title: 42, scenario: '', gap: '', desired: '', context: '' }), /draft field .* must be a string/);
     await assert.rejects(() => save(filePath, { title: 'x' }), /draft field .* must be a string/);
     assert.equal(await load(filePath), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('load migrates a version-1 record in memory to version 2 with empty sources, keeping the file untouched until the next save', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const v1 = {
+      version: 1,
+      title: '旧版标题',
+      scenario: '旧场景',
+      gap: '旧缺口',
+      desired: '旧期望',
+      context: '旧上下文',
+      updatedAt: '2025-06-01T00:00:00.000Z',
+    };
+    writeFileSync(filePath, JSON.stringify(v1), 'utf8');
+
+    const loaded = await load(filePath);
+    assert.equal(loaded.version, DRAFT_SCHEMA_VERSION);
+    assert.deepEqual(loaded.sources, []);
+    assert.equal(loaded.title, '旧版标题');
+    assert.equal(loaded.updatedAt, v1.updatedAt);
+    // The on-disk file is not rewritten by a read; the next save persists v2.
+    assert.equal(JSON.parse(readFileSync(filePath, 'utf8')).version, 1);
+
+    await save(filePath, { title: '新版', scenario: '', gap: '', desired: '', context: '' });
+    const after = JSON.parse(readFileSync(filePath, 'utf8'));
+    assert.equal(after.version, DRAFT_SCHEMA_VERSION);
+    assert.deepEqual(after.sources, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('save rejects sources beyond the per-draft cap', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const tooMany = Array.from({ length: MAX_SOURCES + 1 }, (_, index) => sampleSource({ id: 's:' + index }));
+    await assert.rejects(() => save(filePath, sampleDraft(), tooMany), /sources/);
+    assert.equal(await load(filePath), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('save rejects a malformed source record', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    await assert.rejects(
+      () => save(filePath, sampleDraft(), [sampleSource({ role: 'admin' })]),
+      /source .* role/,
+    );
+    await assert.rejects(
+      () => save(filePath, sampleDraft(), [sampleSource({ kind: 'mystery' })]),
+      /source .* kind/,
+    );
+    await assert.rejects(
+      () => save(filePath, sampleDraft(), [sampleSource({ truncated: 'yes' })]),
+      /source .* truncated/,
+    );
+    await assert.rejects(
+      () => save(filePath, sampleDraft(), [sampleSource({ text: 'x'.repeat(MAX_SOURCE_TEXT + 1) })]),
+      /source .* text/,
+    );
+    await assert.rejects(
+      () => save(filePath, sampleDraft(), [sampleSource({ sessionId: '' })]),
+      /source .* sessionId/,
+    );
+    await assert.rejects(
+      () => save(filePath, sampleDraft(), [sampleSource({ extra: true })]),
+      /source .* keys/,
+    );
+    assert.equal(await load(filePath), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('save rejects sources that are not an array', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    await assert.rejects(() => save(filePath, sampleDraft(), 'not-an-array'), /sources/);
+    await assert.rejects(() => save(filePath, sampleDraft(), { 0: sampleSource() }), /sources/);
+    assert.equal(await load(filePath), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('load isolates a version-2 record with an invalid sources array', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const v2 = {
+      version: 2,
+      title: 'x',
+      scenario: '',
+      gap: '',
+      desired: '',
+      context: '',
+      sources: [{ id: 'broken', sessionId: '' }],
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    writeFileSync(filePath, JSON.stringify(v2), 'utf8');
+    assert.equal(await load(filePath), null);
+    assert.equal(readdirSync(dir).filter((entry) => entry.startsWith('draft.json.corrupt-')).length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

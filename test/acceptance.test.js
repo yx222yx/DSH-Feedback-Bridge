@@ -493,6 +493,205 @@ test('draft autosaves, survives a page reload, resumes, exports, and a confirmed
   }
 });
 
+
+test('user-approved conversation sources drive the exported draft: sentinel isolation, removal semantics and zero external requests', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { existsSync } = await import('node:fs');
+  const tarball = JSON.parse(run('npm', ['pack', '--json'], { cwd: repoRoot }))[0].filename;
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-sources-'));
+  const draftPath = join(dshHome, 'dsh-feedback-bridge', 'draft.json');
+
+  /** Wait until the composer textarea is editable (workspace attached). */
+  async function waitForComposer(page) {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const ta = page.locator('textarea').last();
+      if ((await ta.count()) && (await ta.getAttribute('readonly')) === null) return ta;
+      await page.waitForTimeout(500);
+    }
+    throw new Error('composer never became editable');
+  }
+
+  /** Send one prompt through the composer and wait for its admission. */
+  async function sendMessage(page, ta, text) {
+    await ta.click();
+    await ta.fill(text);
+    await page.keyboard.press('Enter');
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if ((await page.locator('body').innerText()).includes(text)) return;
+      await page.waitForTimeout(500);
+    }
+    throw new Error('message was not admitted: ' + text);
+  }
+
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+
+    const child = spawn('dsh', ['--profile', 'web', '--no-open', '--port', '0'], {
+      cwd: repoRoot,
+      env: cleanEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    const port = await new Promise((resolvePort, reject) => {
+      let stdout = '';
+      const timeout = setTimeout(() => reject(new Error('dsh web did not print a URL; stderr: ' + stderr)), 30_000);
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+        const match = /http:\/\/127\.0\.0\.1:(\d+)/.exec(stdout);
+        if (match !== null) {
+          clearTimeout(timeout);
+          resolvePort(Number(match[1]));
+        }
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timeout);
+        reject(new Error('dsh web exited before printing a URL (code ' + code + '); stderr: ' + stderr));
+      });
+    });
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseUrl });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+
+      // Pick a workspace so the session composer becomes editable.
+      await page.getByRole('button', { name: 'Choose workspace' }).first().click();
+      await page.waitForSelector('[role="dialog"]:visible', { timeout: 15_000 });
+      const dialog = page.locator('[role="dialog"]:visible').first();
+      const testRow = dialog.getByText('test', { exact: true }).first();
+      if (await testRow.count()) {
+        await testRow.click();
+      } else {
+        const controls = new Set(['New folder', 'Show hidden files', 'Cancel', 'Open']);
+        const rows = dialog.locator('[role="button"]');
+        let picked = false;
+        for (let i = 0; i < await rows.count(); i += 1) {
+          const text = (await rows.nth(i).innerText()).trim();
+          if (!controls.has(text) && text !== '') {
+            await rows.nth(i).click();
+            picked = true;
+            break;
+          }
+        }
+        if (!picked) throw new Error('no directory row found in the workspace picker');
+      }
+      await dialog.getByRole('button', { name: 'Open' }).click();
+
+      // Compose a conversation carrying the sentinel material.
+      const ta = await waitForComposer(page);
+      await sendMessage(page, ta, 'SENTINEL_UNSELECTED 这个需求我已经想清楚了');
+      await sendMessage(page, page.locator('textarea').last(), 'SENTINEL_RECOMMENDED 之前的 error 让插件崩了');
+      await sendMessage(page, page.locator('textarea').last(), 'SENTINEL_REVIEWED 我遇到了 error 报错：插件无法加载');
+
+      // The failing turn surfaces real diagnostic context in the transcript.
+      const errorDeadline = Date.now() + 30_000;
+      while (Date.now() < errorDeadline) {
+        if ((await page.locator('body').innerText()).includes('MISSING_CREDENTIAL')) break;
+        await page.waitForTimeout(500);
+      }
+
+      // Open the feedback workspace and inspect the sources panel.
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await page.waitForSelector('[data-testid="dsh-feedback-sources"]', { timeout: 15_000 });
+
+      const panelText = await page.locator('[data-testid="dsh-feedback-sources"]').innerText();
+      assert.match(panelText, /SENTINEL_UNSELECTED/);
+      assert.match(panelText, /SENTINEL_RECOMMENDED/);
+      assert.match(panelText, /SENTINEL_REVIEWED/);
+      assert.match(panelText, /Recommended/);
+      // The failed turn is diagnostic candidate material.
+      assert.match(panelText, /This turn failed|MISSING_CREDENTIAL|运行错误/);
+
+      // Nothing is selected by default.
+      assert.equal(await page.locator('[data-testid="dsh-feedback-source-remove"]').count(), 0);
+
+      // Confirm the reviewed source and quote its reviewed snapshot into the scenario field.
+      const reviewedRow = page.locator('[data-testid^="dsh-feedback-source-"]').filter({ hasText: 'SENTINEL_REVIEWED' }).first();
+      await reviewedRow.locator('[data-testid="dsh-feedback-source-confirm"]').click();
+      await page.waitForTimeout(300);
+      const confirmedReviewed = page.locator('[data-testid^="dsh-feedback-confirmed-"]').filter({ hasText: 'SENTINEL_REVIEWED' }).first();
+      await confirmedReviewed.locator('select').selectOption('scenario');
+
+      // Confirm then remove a second source: it must stop feeding the draft.
+      const recommendedRow = page.locator('[data-testid^="dsh-feedback-source-"]').filter({ hasText: 'SENTINEL_RECOMMENDED' }).first();
+      await recommendedRow.locator('[data-testid="dsh-feedback-source-confirm"]').click();
+      await page.waitForTimeout(300);
+      const confirmedRecommended = page.locator('[data-testid^="dsh-feedback-confirmed-"]').filter({ hasText: 'SENTINEL_RECOMMENDED' }).first();
+      await confirmedRecommended.locator('[data-testid="dsh-feedback-source-remove"]').click();
+      await page.waitForTimeout(300);
+
+      // Fill the public title; the preview must contain only reviewed content.
+      await page.fill('[data-testid="dsh-feedback-title"]', 'Sentinel isolation test');
+      await page.waitForTimeout(1200); // let the debounced autosave land
+      const preview = (await page.textContent('[data-testid="dsh-feedback-preview"]')).trim();
+      assert.match(preview, /# Sentinel isolation test/);
+      assert.match(preview, /SENTINEL_REVIEWED/);
+      assert.doesNotMatch(preview, /SENTINEL_UNSELECTED/);
+      assert.doesNotMatch(preview, /SENTINEL_RECOMMENDED/);
+      assert.doesNotMatch(preview, /MISSING_CREDENTIAL|This turn failed/);
+
+      // The exported file carries exactly the reviewed public draft.
+      const downloadPromise = page.waitForEvent('download');
+      await page.click('[data-testid="dsh-feedback-export"]');
+      const download = await downloadPromise;
+      const exported = readFileSync(await download.path(), 'utf8');
+      assert.match(exported, /# Sentinel isolation test/);
+      assert.match(exported, /SENTINEL_REVIEWED/);
+      assert.doesNotMatch(exported, /SENTINEL_UNSELECTED/);
+      assert.doesNotMatch(exported, /SENTINEL_RECOMMENDED/);
+      assert.doesNotMatch(exported, /MISSING_CREDENTIAL|This turn failed/);
+
+      // The persisted draft keeps only confirmed sources at schema v2.
+      await waitForFile(draftPath, () => existsSync(draftPath) && readFileSync(draftPath, 'utf8').includes('SENTINEL_REVIEWED'));
+      const persisted = readFileSync(draftPath, 'utf8');
+      assert.match(persisted, /"version": 2/);
+      assert.match(persisted, /SENTINEL_REVIEWED/);
+      assert.doesNotMatch(persisted, /SENTINEL_RECOMMENDED/);
+      assert.doesNotMatch(persisted, /SENTINEL_UNSELECTED/);
+
+      await browser.close();
+
+      // Zero external requests and zero GitHub traffic across the whole flow.
+      const external = requests.filter((url) => {
+        const host = new URL(url).hostname;
+        return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]';
+      });
+      assert.deepEqual(external, [], 'unexpected external requests: ' + external.join(', '));
+      assert.ok(!requests.some((url) => /github\.com/i.test(url)), 'a GitHub request was observed during the feedback flow');
+    } finally {
+      if (child.exitCode === null) {
+        child.kill('SIGTERM');
+        await new Promise((resolveExit) => child.once('exit', resolveExit));
+      }
+    }
+  } finally {
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
 test('draft survives a DSH restart with the same DSH_HOME on a different port', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
   const { chromium } = await import('playwright-core');
   const { existsSync } = await import('node:fs');

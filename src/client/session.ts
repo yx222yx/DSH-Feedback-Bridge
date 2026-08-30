@@ -1,4 +1,5 @@
 import type { FeedbackDraft, FeedbackDraftFields, FeedbackFieldKey, FeedbackSessionController } from './types.js';
+import type { ConfirmedSourceRecord } from './sources.js';
 
 /** Section headings passed to the Markdown builder, locale-owned at the call site. */
 export interface DraftMarkdownHeadings {
@@ -58,6 +59,7 @@ export function buildDraftMarkdown(draft: Partial<FeedbackDraftFields>, headings
  */
 export function createFeedbackSessionController(): FeedbackSessionController {
   let draft: FeedbackDraft | null = null;
+  let sources: ConfirmedSourceRecord[] = [];
   return {
     openOrResume() {
       if (draft === null) draft = emptyFeedbackDraft();
@@ -74,11 +76,19 @@ export function createFeedbackSessionController(): FeedbackSessionController {
     restore(persisted: FeedbackDraft) {
       draft = { ...persisted };
     },
+    getSources() {
+      return sources;
+    },
+    setSources(next: ConfirmedSourceRecord[]) {
+      sources = [...next];
+    },
     cancel() {
       draft = null;
+      sources = [];
     },
     dispose() {
       draft = null;
+      sources = [];
     },
   };
 }

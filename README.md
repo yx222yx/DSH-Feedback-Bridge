@@ -21,13 +21,23 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   guidance linking to the official DeepSeek Harness Discussions.
 - The in-progress draft is persisted on the Host at
   `<DSH_HOME>/dsh-feedback-bridge/draft.json` (schema `{version, title, scenario,
-  gap, desired, context, updatedAt}`): edits autosave, a page reload or DSH
-  restart resumes the draft, closing flushes any pending save, and 取消 asks for
-  an explicit confirmation before discarding. Export always keeps the draft
+  gap, desired, context, sources, updatedAt}`): edits autosave, a page reload or
+  DSH restart resumes the draft, closing flushes any pending save, and 取消 asks
+  for an explicit confirmation before discarding. Export always keeps the draft
   (“已导出，草稿仍保留”). Corrupt or unknown-version files are quarantined instead
   of silently overwritten; a confirmed discard can never be undone by a late
   autosave. Copy, export, autosave, and discard make zero GitHub writes and zero
   external network requests.
+- The workspace lists candidate **反馈来源** from the current conversation
+  (messages, tool results, turn errors, and a session-diagnostics block) through
+  the official `ctx.sessions` client face. Rule-based recommendations are
+  visibly badges and never select anything; only explicit user confirmation moves
+  a candidate into the persisted `sources` array (reviewed snapshot captured at
+  confirm time, capped at 16 KiB per source, 32 sources max). Removing a source
+  immediately stops it feeding draft preparation. The exported Markdown is built
+  only from the five reviewed public fields — raw messages, logs, and diagnostics
+  never enter it unexamined; advisory-only sensitive markers warn without
+  auto-blocking.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
 

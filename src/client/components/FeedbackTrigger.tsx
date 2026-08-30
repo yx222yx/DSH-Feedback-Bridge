@@ -2,6 +2,7 @@ import React from 'react';
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client';
 import { FeedbackIcon } from './FeedbackIcon.js';
 import { FeedbackWorkspace } from './FeedbackWorkspace.js';
+import type { ConversationSource } from '../conversation.js';
 import type { DraftPersistence, FeedbackSessionController, T } from '../types.js';
 
 /** Full props of the sidebar footer action: owner state plus the plugin's own share. */
@@ -9,6 +10,7 @@ export interface FeedbackTriggerProps extends SidebarFooterActionOwnerProps {
   t: T;
   sessions: FeedbackSessionController;
   persistence: DraftPersistence;
+  conversation: ConversationSource | null;
 }
 
 /**
@@ -17,7 +19,7 @@ export interface FeedbackTriggerProps extends SidebarFooterActionOwnerProps {
  * every locale by product mandate, and the collapsed rail keeps the same
  * Chinese accessible name.
  */
-export function FeedbackTrigger({ t, sessions, persistence, wide }: FeedbackTriggerProps): React.ReactElement {
+export function FeedbackTrigger({ t, sessions, persistence, conversation, wide }: FeedbackTriggerProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   return (
     <>
@@ -33,7 +35,7 @@ export function FeedbackTrigger({ t, sessions, persistence, wide }: FeedbackTrig
         {wide ? <span className="dsh-feedback-trigger-label">{t('nav')}</span> : null}
       </button>
       {open ? (
-        <FeedbackWorkspace t={t} sessions={sessions} persistence={persistence} onClose={() => setOpen(false)} />
+        <FeedbackWorkspace t={t} sessions={sessions} persistence={persistence} conversation={conversation} onClose={() => setOpen(false)} />
       ) : null}
     </>
   );
