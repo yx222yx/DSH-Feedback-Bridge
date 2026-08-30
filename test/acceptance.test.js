@@ -1854,7 +1854,7 @@ function rectsOverlap(a, b) {
   return !(a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y);
 }
 
-test('final confirmation expands below the edit form without overlapping any control (browser geometry regression)', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+test('final confirmation opens as a centered dialog without disturbing the edit form (browser geometry regression)', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
   const { chromium } = await import('playwright-core');
   const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -1886,6 +1886,9 @@ test('final confirmation expands below the edit form without overlapping any con
       await page.click('[data-testid="dsh-feedback-trigger"]');
       await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
       await fillPublicDraft(page);
+      const editRowBefore = await page.locator('.dsh-feedback-edit-row').boundingBox();
+      assert.ok(editRowBefore !== null && editRowBefore.height > 100, 'the edit row must have a real height before the dialog opens');
+
       await page.click('[data-testid="dsh-feedback-submission-open"]');
       await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
       await page.waitForTimeout(500);
@@ -1898,45 +1901,53 @@ test('final confirmation expands below the edit form without overlapping any con
           return { x: box.x, y: box.y, width: box.width, height: box.height };
         };
         return {
-          title: rect('[data-testid="dsh-feedback-title"]'),
-          scenario: rect('[data-testid="dsh-feedback-scenario"]'),
-          gap: rect('[data-testid="dsh-feedback-gap"]'),
-          desired: rect('[data-testid="dsh-feedback-desired"]'),
-          submission: rect('[data-testid="dsh-feedback-submission"]'),
+          editRow: rect('.dsh-feedback-edit-row'),
+          dialog: rect('.dsh-feedback-submission-dialog'),
+          overlay: rect('[data-testid="dsh-feedback-submission-dialog-overlay"]'),
           signIn: rect('[data-testid="dsh-feedback-submission-oauth-sign-in"]'),
           disclosure: rect('[data-testid="dsh-feedback-submission-oauth-disclosure"]'),
           back: rect('[data-testid="dsh-feedback-submission-back"]'),
           exportBtn: rect('[data-testid="dsh-feedback-submission-export"]'),
+          viewport: { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight },
         };
       });
 
-      const assertNoOverlap = (label, boxes) => {
-        // The final confirmation sits below the whole edit form, not over it.
+      const assertDialog = (label, boxes) => {
+        // The dialog is a centered overlay card that fits inside the viewport.
+        assert.ok(boxes.overlay !== null && boxes.dialog !== null, label + ': the dialog overlay must be present');
         assert.ok(
-          boxes.submission.y >= boxes.title.y + boxes.title.height,
-          label + ': the final confirmation must start below the title field',
+          boxes.dialog.x >= 0 && boxes.dialog.y >= 0
+            && boxes.dialog.x + boxes.dialog.width <= boxes.viewport.width + 1
+            && boxes.dialog.y + boxes.dialog.height <= boxes.viewport.height + 1,
+          label + ': the dialog must fit inside the viewport',
         );
-        assert.ok(!rectsOverlap(boxes.submission, boxes.title), label + ': submission must not overlap the title field');
-        assert.ok(!rectsOverlap(boxes.submission, boxes.scenario), label + ': submission must not overlap the scenario field');
-        assert.ok(!rectsOverlap(boxes.signIn, boxes.scenario), label + ': the sign-in button must not overlap the scenario field');
-        assert.ok(!rectsOverlap(boxes.disclosure, boxes.gap), label + ': the disclosure must not overlap the gap field');
-        assert.ok(!rectsOverlap(boxes.back, boxes.scenario), label + ': the back button must not sit inside the scenario textarea');
-        assert.ok(!rectsOverlap(boxes.exportBtn, boxes.gap), label + ': the export button must not sit inside the gap textarea');
-        // The form fields keep their vertical order.
-        assert.ok(
-          boxes.title.y < boxes.scenario.y && boxes.scenario.y < boxes.gap.y && boxes.gap.y < boxes.desired.y,
-          label + ': the edit fields must keep their vertical order',
-        );
+        // The dialog's own controls never overlap each other.
+        assert.ok(!rectsOverlap(boxes.signIn, boxes.disclosure), label + ': sign-in must not overlap the disclosure');
+        assert.ok(!rectsOverlap(boxes.signIn, boxes.back), label + ': sign-in must not overlap the back button');
+        assert.ok(!rectsOverlap(boxes.signIn, boxes.exportBtn), label + ': sign-in must not overlap the export button');
+        assert.ok(!rectsOverlap(boxes.disclosure, boxes.back), label + ': the disclosure must not overlap the back button');
+        assert.ok(!rectsOverlap(boxes.disclosure, boxes.exportBtn), label + ': the disclosure must not overlap the export button');
+        assert.ok(!rectsOverlap(boxes.back, boxes.exportBtn), label + ': the back and export buttons must not overlap');
       };
 
       const wide = await measure();
-      assertNoOverlap('wide', wide);
+      assertDialog('wide', wide);
+      // Opening the dialog must not squeeze or collapse the edit form underneath.
+      assert.ok(
+        Math.abs(wide.editRow.height - editRowBefore.height) < 2,
+        'the edit form height must not change when the dialog opens (was ' + editRowBefore.height + ', now ' + wide.editRow.height + ')',
+      );
 
-      // Narrower window: single-column layout must still never overlap.
+      // Narrower window: the dialog still fits and its controls stay disjoint.
       await page.setViewportSize({ width: 700, height: 800 });
       await page.waitForTimeout(400);
       const narrow = await measure();
-      assertNoOverlap('narrow', narrow);
+      assertDialog('narrow', narrow);
+
+      // The dialog closes back to the workspace without any mutation.
+      await page.click('[data-testid="dsh-feedback-submission-back"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-dialog-overlay"]', { state: 'detached', timeout: 10_000 });
+      assert.equal(githubMutationCount(github.requests), 0, 'closing the dialog must never mutate');
 
       await browser.close();
     } finally {

@@ -913,25 +913,6 @@ const OAUTH_POLL_MS = 1000;
             <pre className="dsh-feedback-preview" data-testid="dsh-feedback-preview">{markdown}</pre>
           </section>
           </div>
-          {submissionOpen ? (
-            <SubmitPanel
-              t={t}
-              state={submission}
-              title={fields.title}
-              body={markdown}
-              language={fields.language ?? 'en'}
-              categoryId={submissionCategory}
-              onCategoryChange={setSubmissionCategory}
-              onConfirm={confirmSubmission}
-              onAccountSelected={selectSubmissionAccount}
-              onStartOAuth={startOAuth}
-              onCancelOAuth={cancelOAuth}
-              onRetryOAuth={retryOAuth}
-              onDisconnect={disconnectOAuth}
-              onBack={closeSubmission}
-              onExport={handleExport}
-            />
-          ) : null}
         </div>
         <footer className="dsh-feedback-footer">
           <div className="dsh-feedback-actions">
@@ -1009,6 +990,30 @@ const OAUTH_POLL_MS = 1000;
           </div>
         ) : null}
       </div>
+      {submissionOpen ? (
+        <div className="dsh-feedback-submission-overlay" data-testid="dsh-feedback-submission-dialog-overlay">
+          <div className="dsh-feedback-submission-mask" onClick={closeSubmission} aria-hidden="true" />
+          <div className="dsh-feedback-submission-dialog" role="dialog" aria-modal="true" aria-label={t('submission.title')}>
+            <SubmitPanel
+              t={t}
+              state={submission}
+              title={fields.title}
+              body={markdown}
+              language={fields.language ?? 'en'}
+              categoryId={submissionCategory}
+              onCategoryChange={setSubmissionCategory}
+              onConfirm={confirmSubmission}
+              onAccountSelected={selectSubmissionAccount}
+              onStartOAuth={startOAuth}
+              onCancelOAuth={cancelOAuth}
+              onRetryOAuth={retryOAuth}
+              onDisconnect={disconnectOAuth}
+              onBack={closeSubmission}
+              onExport={handleExport}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
