@@ -401,3 +401,110 @@ test('oauth provider maps an expired grant and an expired token to authorization
   });
   assert.deepEqual(outcome, { status: 'failed', code: 'authorization-expired' });
 });
+
+// ---------------------------------------------------------------------------
+// dual provider (both device flow and gh CLI available; explicit user choice)
+// ---------------------------------------------------------------------------
+
+import { createDualGitHubService } from '../lib/oauth.js';
+
+/** Fake gh-capable service double. */
+function fakeGhService({ ready = true } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async prepare(options) {
+      calls.push(['prepare', options?.account ?? null]);
+      if (!ready) return { status: 'failed', code: 'authorization-required' };
+      return { status: 'ready', identity: { login: 'gh-user' }, repositoryId: 'R', categories: [], destination: { owner: 'deepseek-ai', repo: 'deepseek-harness', url: 'https://github.com/deepseek-ai/deepseek-harness/discussions' } };
+    },
+    async createDiscussion(input) {
+      calls.push(['createDiscussion', input.identity.login]);
+      return { status: 'created', url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/1' };
+    },
+  };
+}
+
+/** Fake oauth-capable service double. */
+function fakeOauthService() {
+  const calls = [];
+  return {
+    calls,
+    async prepare() {
+      calls.push(['prepare']);
+      return { status: 'ready', identity: { login: 'alice' }, repositoryId: 'R', categories: [], destination: { owner: 'deepseek-ai', repo: 'deepseek-harness', url: 'https://github.com/deepseek-ai/deepseek-harness/discussions' } };
+    },
+    async createDiscussion(input) {
+      calls.push(['createDiscussion', input.identity.login]);
+      return { status: 'created', url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/2' };
+    },
+  };
+}
+
+function fakeGhRunner(accounts) {
+  return {
+    async listAccounts() { return accounts; },
+    async tokenFor() { throw new Error('unused'); },
+  };
+}
+
+test('the dual provider requires an explicit auth choice and reports gh availability', async () => {
+  const ghService = fakeGhService();
+  const oauthService = fakeOauthService();
+  const store = fakeGrantStore();
+  const service = createDualGitHubService({ ghService, oauthService, gh: fakeGhRunner([{ login: 'gh-user', active: true }]), grantStore: store });
+  assert.deepEqual(await service.prepare(), { status: 'auth-method-required', ghAvailable: true });
+  assert.equal(ghService.calls.length, 0, 'no gh discovery beyond the availability probe');
+  assert.equal(oauthService.calls.length, 0);
+
+  const noGh = createDualGitHubService({ ghService, oauthService, gh: fakeGhRunner([]), grantStore: store });
+  assert.deepEqual(await noGh.prepare(), { status: 'auth-method-required', ghAvailable: false });
+});
+
+test('the dual provider reuses an existing oauth grant and routes the mutation to the oauth provider', async () => {
+  const ghService = fakeGhService();
+  const oauthService = fakeOauthService();
+  const store = fakeGrantStore();
+  await store.writeGrant(VALID_GRANT);
+  const service = createDualGitHubService({ ghService, oauthService, gh: fakeGhRunner([]), grantStore: store });
+  const prepared = await service.prepare();
+  assert.equal(prepared.status, 'ready');
+  if (prepared.status !== 'ready') return;
+  assert.deepEqual(prepared.identity, { login: 'alice' });
+  assert.deepEqual(oauthService.calls, [['prepare']]);
+  const outcome = await service.createDiscussion({
+    title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
+  });
+  assert.deepEqual(oauthService.calls[1], ['createDiscussion', 'alice']);
+  assert.equal(ghService.calls.length, 0, 'a grant-backed session must never touch the gh provider');
+});
+
+test('the dual provider honors an explicit gh method and routes the mutation to the gh provider', async () => {
+  const ghService = fakeGhService();
+  const oauthService = fakeOauthService();
+  const store = fakeGrantStore();
+  const service = createDualGitHubService({ ghService, oauthService, gh: fakeGhRunner([]), grantStore: store });
+  const prepared = await service.prepare({ method: 'gh' });
+  assert.equal(prepared.status, 'ready');
+  if (prepared.status !== 'ready') return;
+  assert.deepEqual(prepared.identity, { login: 'gh-user' });
+  assert.deepEqual(ghService.calls, [['prepare', null]]);
+  const outcome = await service.createDiscussion({
+    title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'gh-user' },
+  });
+  assert.deepEqual(ghService.calls[1], ['createDiscussion', 'gh-user']);
+  assert.equal(oauthService.calls.length, 0, 'an explicit gh session must never touch the oauth provider');
+});
+
+test('the dual provider routes a mutation to gh when the grant login does not match the confirmed identity', async () => {
+  const ghService = fakeGhService();
+  const oauthService = fakeOauthService();
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, login: 'other' });
+  const service = createDualGitHubService({ ghService, oauthService, gh: fakeGhRunner([]), grantStore: store });
+  await service.createDiscussion({
+    title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'gh-user' },
+  });
+  assert.deepEqual(ghService.calls, [['createDiscussion', 'gh-user']]);
+  assert.equal(oauthService.calls.length, 0);
+});

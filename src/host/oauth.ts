@@ -19,6 +19,7 @@ import type { CredentialProvider } from '@deepseek-ai/dsh-credentials';
 import {
   CREATE_DISCUSSION_MUTATION,
   GitHubReadError,
+  type GhCli,
   mutationHttpCode,
   OFFICIAL_DISCUSSION_OWNER,
   OFFICIAL_DISCUSSION_REPO,
@@ -412,7 +413,7 @@ export function createOAuthGitHubService(
     return init;
   };
   return {
-    async prepare() {
+    async prepare(_options) {
       const usable = await usableGrant(deps.grantStore);
       if (usable.kind !== 'grant') {
         return { status: 'failed', code: usable.code };
@@ -640,6 +641,49 @@ export function createOAuthFlowManager(
     },
     cancel() {
       if (current !== null) settle({ phase: 'cancelled' });
+    },
+  };
+}
+
+/**
+ * Create the dual GitHub service (Issue #10 'both'): Device Flow and the
+ * GitHub CLI path are both available and the user chooses explicitly. A
+ * plain prepare returns `auth-method-required` with whether a local gh
+ * account exists; `prepare({method})` runs the chosen path. An existing
+ * oauth grant is reused automatically. The mutation routes to the provider
+ * that owns the confirmed identity: an oauth grant whose login matches the
+ * confirmed identity goes through oauth, otherwise through gh.
+ *
+ * @param deps - the gh service, oauth service, gh runner, and grant store.
+ * @returns the dual service handle.
+ */
+export function createDualGitHubService(deps: {
+  ghService: GitHubService;
+  oauthService: GitHubService;
+  gh: GhCli;
+  grantStore: GitHubGrantStore;
+}): GitHubService {
+  return {
+    async prepare(options) {
+      if (options?.method === 'gh') {
+        return deps.ghService.prepare({ account: options.account });
+      }
+      if (options?.method === 'oauth') {
+        return deps.oauthService.prepare();
+      }
+      const grant = await deps.grantStore.readGrant();
+      if (grant !== undefined) {
+        return deps.oauthService.prepare();
+      }
+      const accounts = await deps.gh.listAccounts();
+      return { status: 'auth-method-required', ghAvailable: accounts.length > 0 };
+    },
+    async createDiscussion(input) {
+      const grant = await deps.grantStore.readGrant();
+      if (grant !== undefined && grant.login === input.identity.login) {
+        return deps.oauthService.createDiscussion(input);
+      }
+      return deps.ghService.createDiscussion(input);
     },
   };
 }

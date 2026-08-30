@@ -98,7 +98,11 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   returns to draft export. The UI discloses that the DSH local credentials
   provider is not an operating-system security boundary. Configure via
   `github.auth.provider: oauth` plus `github.oauth.clientId` (and the
-  optional endpoint overrides) in the profile patch.
+  optional endpoint overrides) in the profile patch. A deployment that also
+  wants the advanced path sets `github.auth.provider: both`: the final
+  confirmation then asks the user to choose between **Sign in with GitHub**
+  and **Use GitHub CLI account** (shown only when a local gh login exists),
+  with an explicit selection on each side.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
 

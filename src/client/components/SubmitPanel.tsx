@@ -25,6 +25,7 @@ const AUTH_GUIDANCE_KEYS: Partial<Record<Exclude<GitHubSubmissionFailureCode, 'u
 export type SubmissionPanelState =
   | { phase: 'preparing' }
   | { phase: 'authorize' }
+  | { phase: 'choose-auth'; ghAvailable: boolean }
   | { phase: 'authorizing'; userCode?: string; verificationUri?: string }
   | { phase: 'oauth-failed'; code: OAuthFailureCode }
   | { phase: 'select-account'; accounts: { login: string }[] }
@@ -57,8 +58,10 @@ export interface SubmitPanelProps {
   onConfirm(): void;
   /** The explicit account choice that must precede any gh-backed confirmation. */
   onAccountSelected(login: string): void;
-  /** Start the oauth device flow from the authorize step. */
+  /** Start the oauth device flow from the authorize or choose step. */
   onStartOAuth?(): void;
+  /** Run the explicit GitHub CLI path from the choose step. */
+  onChooseGh?(): void;
   /** Withdraw the running oauth attempt. */
   onCancelOAuth?(): void;
   /** Re-present the authorize step after an oauth failure. */
@@ -81,7 +84,7 @@ export interface SubmitPanelProps {
  * results each render distinct localized outcomes that preserve draft export;
  * an unknown result never offers a retry.
  */
-export function SubmitPanel({ t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onAccountSelected, onStartOAuth, onCancelOAuth, onRetryOAuth, onCopyCode, onDisconnect, onBack, onExport }: SubmitPanelProps): React.ReactElement {
+export function SubmitPanel({ t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onAccountSelected, onStartOAuth, onChooseGh, onCancelOAuth, onRetryOAuth, onCopyCode, onDisconnect, onBack, onExport }: SubmitPanelProps): React.ReactElement {
   return (
     <section className="dsh-feedback-submission" data-testid="dsh-feedback-submission">
       <h3 className="dsh-feedback-section-title">{t('submission.title')}</h3>
@@ -100,6 +103,7 @@ export function SubmitPanel({ t, state, title, body, language, categoryId, onCat
         )
         : null}
       {state.phase === 'authorize' ? renderAuthorize(t, onStartOAuth, onBack, onExport) : null}
+      {state.phase === 'choose-auth' ? renderChooseAuth(t, state.ghAvailable, onStartOAuth, onChooseGh, onBack, onExport) : null}
       {state.phase === 'authorizing' ? renderAuthorizing(t, state.userCode, state.verificationUri, onCopyCode, onCancelOAuth, onBack, onExport) : null}
       {state.phase === 'oauth-failed' ? renderOAuthFailed(t, state.code, onRetryOAuth, onBack, onExport) : null}
       {state.phase === 'ready' ? renderReady(t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onDisconnect, onBack, onExport) : null}
@@ -402,6 +406,41 @@ function renderOAuthFailed(
         <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-oauth-retry" onClick={onRetryOAuth}>
           {t('oauth.retry')}
         </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-back" onClick={onBack}>
+          {t('submission.back')}
+        </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-export" onClick={onExport}>
+          {t('submission.export')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Render the explicit auth-method choice: Device Flow always, GitHub CLI only when a local account exists. */
+function renderChooseAuth(
+  t: T,
+  ghAvailable: boolean,
+  onStartOAuth: (() => void) | undefined,
+  onChooseGh: (() => void) | undefined,
+  onBack: () => void,
+  onExport: () => void,
+): React.ReactElement {
+  return (
+    <div className="dsh-feedback-submission-choose" data-testid="dsh-feedback-submission-oauth-choose">
+      <p className="dsh-feedback-submission-account-prompt">{t('oauth.choose')}</p>
+      <div className="dsh-feedback-submission-actions">
+        <button type="button" className="dsh-feedback-action dsh-feedback-action-primary" data-testid="dsh-feedback-submission-oauth-sign-in" onClick={onStartOAuth}>
+          {t('oauth.signIn')}
+        </button>
+        {ghAvailable ? (
+          <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-oauth-gh-cli" onClick={onChooseGh}>
+            {t('oauth.ghCli')}
+          </button>
+        ) : null}
+      </div>
+      <p className="dsh-feedback-submission-guidance" data-testid="dsh-feedback-submission-oauth-disclosure">{t('oauth.disclosure')}</p>
+      <div className="dsh-feedback-submission-actions">
         <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-back" onClick={onBack}>
           {t('submission.back')}
         </button>

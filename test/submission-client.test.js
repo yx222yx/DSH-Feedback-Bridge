@@ -127,9 +127,9 @@ test('createSubmissionTransport prepare appends the explicitly selected account 
       });
     },
   });
-  const result = await transport.prepare('alice');
+  const result = await transport.prepare({ method: 'gh', account: 'alice' });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].input, '/dsh-feedback-bridge/submission?account=alice');
+  assert.equal(calls[0].input, '/dsh-feedback-bridge/submission?method=gh&account=alice');
   assert.equal(calls[0].method, 'GET');
   assert.deepEqual(result, {
     status: 'account-selection-required',
@@ -149,4 +149,21 @@ test('createSubmissionTransport prepare without an account keeps the plain submi
   const result = await transport.prepare();
   assert.equal(calls[0].input, '/dsh-feedback-bridge/submission');
   assert.deepEqual(result, PREPARED);
+});
+
+test('createSubmissionTransport prepare passes the oauth method and surfaces auth-method-required', async () => {
+  const calls = [];
+  const transport = moduleExports.createSubmissionTransport({
+    submissionUrl: '/dsh-feedback-bridge/submission',
+    fetchImpl(input, init) {
+      calls.push({ input, method: init.method });
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve({ status: 'auth-method-required', ghAvailable: true }),
+      });
+    },
+  });
+  const result = await transport.prepare({ method: 'oauth' });
+  assert.equal(calls[0].input, '/dsh-feedback-bridge/submission?method=oauth');
+  assert.deepEqual(result, { status: 'auth-method-required', ghAvailable: true });
 });

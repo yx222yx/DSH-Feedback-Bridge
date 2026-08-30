@@ -112,6 +112,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   const [similarity, setSimilarity] = React.useState<SimilarityPanelState>({ phase: 'idle' });
   const [retryNonce, setRetryNonce] = React.useState(0);
   const [submissionOpen, setSubmissionOpen] = React.useState(false);
+  const [authMethod, setAuthMethod] = React.useState<'gh' | 'oauth' | undefined>(undefined);
   const [submission, setSubmission] = React.useState<SubmissionPanelState>({ phase: 'preparing' });
   const [submissionCategory, setSubmissionCategory] = React.useState('');
   const seqRef = React.useRef(0);
@@ -298,43 +299,71 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   /** Poll interval for the oauth attempt status. */
 const OAUTH_POLL_MS = 1000;
 
-/** Open the final confirmation panel and resolve the read-only submission snapshot. */
+  /** Apply one prepared snapshot to the panel state machine. */
+  const applyPrepared = (result: import('../submission.js').SubmissionPrepareResult) => {
+    if (result.status === 'account-selection-required') {
+      setSubmission({ phase: 'select-account', accounts: result.accounts });
+      return;
+    }
+    if (result.status === 'auth-method-required') {
+      setSubmission({ phase: 'choose-auth', ghAvailable: result.ghAvailable });
+      return;
+    }
+    if (result.status === 'ready') {
+      setSubmissionCategory((current) => (current !== '' && result.categories.some((category) => category.id === current)
+        ? current
+        : (result.categories[0]?.id ?? '')));
+      setSubmission({
+        phase: 'ready',
+        preparedId: result.preparedId,
+        identity: result.identity,
+        categories: result.categories,
+        destination: result.destination,
+      });
+      return;
+    }
+    // Prepare is read-only; the host never reports unknown for it.
+    setSubmission({ phase: 'failed', code: result.code !== 'unknown' ? result.code : 'network' });
+  };
+
+  /** Open the final confirmation panel and resolve the read-only submission snapshot. */
   const openSubmission = () => {
     if (submissionTransport === undefined) return;
     userInteractedRef.current = true;
     setSubmissionOpen(true);
+    setAuthMethod(undefined);
     setSubmission({ phase: 'preparing' });
     submissionTransport.prepare()
       .then((result) => {
-        if (result.status === 'account-selection-required') {
-          setSubmission({ phase: 'select-account', accounts: result.accounts });
-          return;
-        }
-        if (result.status === 'ready') {
-          setSubmissionCategory((current) => (current !== '' && result.categories.some((category) => category.id === current)
-            ? current
-            : (result.categories[0]?.id ?? '')));
-          setSubmission({
-            phase: 'ready',
-            preparedId: result.preparedId,
-            identity: result.identity,
-            categories: result.categories,
-            destination: result.destination,
-          });
-        } else if (result.status === 'failed' && result.code === 'authorization-required' && oauthTransport !== undefined) {
+        if (result.status === 'failed' && result.code === 'authorization-required' && oauthTransport !== undefined) {
           // The oauth provider needs a grant: offer the sign-in step.
           oauthTransport.status()
             .then((oauth) => {
               if (oauth.supported) setSubmission({ phase: 'authorize' });
-              else setSubmission({ phase: 'failed', code: 'authorization-required' });
+              else applyPrepared(result);
             })
-            .catch(() => setSubmission({ phase: 'failed', code: 'authorization-required' }));
-        } else if (result.code !== 'unknown') {
-          // Prepare is read-only; the host never reports unknown for it.
-          setSubmission({ phase: 'failed', code: result.code });
-        } else {
-          setSubmission({ phase: 'failed', code: 'network' });
+            .catch(() => applyPrepared(result));
+          return;
         }
+        applyPrepared(result);
+      })
+      .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
+  };
+
+  /** Run the explicit GitHub CLI path from the auth-method choice. */
+  const chooseGh = () => {
+    if (submissionTransport === undefined) return;
+    userInteractedRef.current = true;
+    setAuthMethod('gh');
+    setSubmission({ phase: 'preparing' });
+    submissionTransport.prepare({ method: 'gh' })
+      .then((result) => {
+        if (result.status === 'failed' && result.code === 'authorization-required') {
+          // The local gh login vanished mid-flow: re-probe the choice step.
+          openSubmission();
+          return;
+        }
+        applyPrepared(result);
       })
       .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
   };
@@ -408,29 +437,8 @@ const OAUTH_POLL_MS = 1000;
     if (submissionTransport === undefined) return;
     userInteractedRef.current = true;
     setSubmission({ phase: 'preparing' });
-    submissionTransport.prepare(login)
-      .then((result) => {
-        if (result.status === 'account-selection-required') {
-          setSubmission({ phase: 'select-account', accounts: result.accounts });
-          return;
-        }
-        if (result.status === 'ready') {
-          setSubmissionCategory((current) => (current !== '' && result.categories.some((category) => category.id === current)
-            ? current
-            : (result.categories[0]?.id ?? '')));
-          setSubmission({
-            phase: 'ready',
-            preparedId: result.preparedId,
-            identity: result.identity,
-            categories: result.categories,
-            destination: result.destination,
-          });
-        } else if (result.code !== 'unknown') {
-          setSubmission({ phase: 'failed', code: result.code });
-        } else {
-          setSubmission({ phase: 'failed', code: 'network' });
-        }
-      })
+    submissionTransport.prepare({ method: 'gh', account: login })
+      .then(applyPrepared)
       .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
   };
 
@@ -1017,10 +1025,11 @@ const OAUTH_POLL_MS = 1000;
               onConfirm={confirmSubmission}
               onAccountSelected={selectSubmissionAccount}
               onStartOAuth={startOAuth}
+              onChooseGh={chooseGh}
               onCancelOAuth={cancelOAuth}
               onRetryOAuth={retryOAuth}
               onCopyCode={copyOAuthCode}
-              onDisconnect={disconnectOAuth}
+              onDisconnect={oauthTransport !== undefined && authMethod !== 'gh' ? disconnectOAuth : undefined}
               onBack={closeSubmission}
               onExport={handleExport}
             />

@@ -12,10 +12,11 @@ import {
   type SimilarityConfig,
   type SimilarityInput,
 } from './similarity.js';
-import { createGitHubService, normalizeGitHubConfig, type GitHubConfig, type GitHubGrantStore, type GitHubService } from './github.js';
+import { createGitHubService, normalizeGitHubConfig, type GitHubConfig, type GitHubDeps, type GitHubGrantStore, type GitHubService } from './github.js';
 import { createGhCli, createGhRun } from './gh-cli.js';
 import {
   createCredentialsGrantStore,
+  createDualGitHubService,
   createOAuthFlowManager,
   createOAuthGitHubService,
   normalizeOAuthConfig,
@@ -645,13 +646,21 @@ async function handleSubmissionPrepare(service: GitHubService, store: Submission
   }
   const url = new URL(request.url ?? '/', 'http://dsh-feedback-bridge.local');
   const account = url.searchParams.get('account');
-  const result = await service.prepare(account === null ? undefined : account);
+  const method = url.searchParams.get('method');
+  const result = await service.prepare({
+    ...(method === 'gh' || method === 'oauth' ? { method } : {}),
+    ...(account !== null ? { account } : {}),
+  });
   if (result.status === 'failed') {
     writeJson(response, 200, { status: 'failed', code: result.code });
     return;
   }
   if (result.status === 'account-selection-required') {
     writeJson(response, 200, { status: 'account-selection-required', accounts: result.accounts });
+    return;
+  }
+  if (result.status === 'auth-method-required') {
+    writeJson(response, 200, { status: 'auth-method-required', ghAvailable: result.ghAvailable });
     return;
   }
   const preparedId = store.create({
@@ -903,19 +912,25 @@ export function apply(ctx: Context, config?: PluginConfig): void {
   assertCompatibleDsh();
   const similarityConfig = normalizeSimilarityConfig(config?.similarity);
   const githubConfig: GitHubConfig = normalizeGitHubConfig(config?.github);
-  const oauthConfig: GitHubOAuthConfig | null = githubConfig.auth.provider === 'oauth'
-    ? normalizeOAuthConfig((config?.github as { oauth?: unknown } | undefined)?.oauth)
-    : null;
+  const oauthConfig: GitHubOAuthConfig | null =
+    githubConfig.auth.provider === 'oauth' || githubConfig.auth.provider === 'both'
+      ? normalizeOAuthConfig((config?.github as { oauth?: unknown } | undefined)?.oauth)
+      : null;
   const grantStore: GitHubGrantStore = createCredentialsGrantStore(ctx.credentials);
-  const githubService = oauthConfig === null
-    ? createGitHubService(githubConfig, {
-      fetchImpl: (url, init) => fetch(url, init),
-      gh: createGhCli(createGhRun()),
-    })
-    : createOAuthGitHubService(githubConfig, oauthConfig, {
-      fetchImpl: (url, init) => fetch(url, init),
+  const ghRunner = createGhCli(createGhRun());
+  const fetchImpl = (url: string, init: Parameters<GitHubDeps['fetchImpl']>[1]) => fetch(url, init);
+  const plainService = createGitHubService(githubConfig, { fetchImpl, gh: ghRunner });
+  let githubService: GitHubService = plainService;
+  if (githubConfig.auth.provider === 'oauth') {
+    githubService = createOAuthGitHubService(githubConfig, oauthConfig as GitHubOAuthConfig, { fetchImpl, grantStore });
+  } else if (githubConfig.auth.provider === 'both') {
+    githubService = createDualGitHubService({
+      ghService: createGitHubService({ ...githubConfig, auth: { provider: 'gh' } }, { fetchImpl, gh: ghRunner }),
+      oauthService: createOAuthGitHubService(githubConfig, oauthConfig as GitHubOAuthConfig, { fetchImpl, grantStore }),
+      gh: ghRunner,
       grantStore,
     });
+  }
   const oauthFlow = oauthConfig === null
     ? null
     : createOAuthFlowManager(oauthConfig, {

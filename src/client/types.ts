@@ -184,6 +184,8 @@ export type FeedbackBridgeKey =
   | 'submission.guidance.reauth'
   | 'submission.guidance.scopes'
   | 'oauth.signIn'
+  | 'oauth.choose'
+  | 'oauth.ghCli'
   | 'oauth.waiting'
   | 'oauth.open'
   | 'oauth.enterCode'

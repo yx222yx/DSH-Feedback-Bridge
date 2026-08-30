@@ -59,6 +59,13 @@ a distributed client secret.
   scope, and failures; the WSL2 browser acceptance intercepts the handoff to
   the device authorization page without contacting real GitHub.
 - The advanced GitHub CLI path from #9 is unchanged and remains available.
+- **Dual provider (`provider: both`).** A deployment can enable both methods:
+  the submission route then returns `auth-method-required` (with whether a
+  local gh account exists) until the user explicitly picks Device Flow or the
+  GitHub CLI path (`?method=oauth` / `?method=gh`). An existing oauth grant
+  is reused automatically; the mutation routes to the provider owning the
+  confirmed identity (an oauth grant whose login matches goes through oauth,
+  otherwise through gh).
 
 ## Consequences
 

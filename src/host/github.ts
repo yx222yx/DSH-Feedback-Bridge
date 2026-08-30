@@ -78,7 +78,8 @@ export type GitHubAuthConfig =
   | { provider: 'none' }
   | { provider: 'fake'; identity: GitHubIdentity }
   | { provider: 'gh' }
-  | { provider: 'oauth' };
+  | { provider: 'oauth' }
+  | { provider: 'both' };
 
 /** Deployment-varying GitHub service settings; defaults in {@link DEFAULT_GITHUB_CONFIG}. */
 export interface GitHubConfig {
@@ -111,6 +112,7 @@ export type PrepareResult =
     destination: OfficialDestination;
   }
   | { status: 'account-selection-required'; accounts: GitHubIdentity[] }
+  | { status: 'auth-method-required'; ghAvailable: boolean }
   | { status: 'failed'; code: GitHubSubmissionFailureCode };
 
 /** The one mutation the service can perform. */
@@ -149,7 +151,7 @@ export interface GitHubDeps {
 /** The replaceable GitHub service surface used by the submission routes. */
 export interface GitHubService {
   /** Read-only: resolve the identity and the official repository's Discussion categories; the gh provider takes the explicitly selected account. */
-  prepare(account?: string): Promise<PrepareResult>;
+  prepare(options?: { method?: 'gh' | 'oauth'; account?: string }): Promise<PrepareResult>;
   /** The only mutation: create one Discussion. Never retries; exactly one request. */
   createDiscussion(input: CreateDiscussionInput): Promise<CreateDiscussionOutcome>;
 }
@@ -236,6 +238,11 @@ export function normalizeGitHubConfig(raw: unknown): GitHubConfig {
         throw new Error('dsh-feedback-bridge: github.auth oauth must not pin an identity; the grant is resolved at runtime');
       }
       config.auth = { provider: 'oauth' };
+    } else if (auth.provider === 'both') {
+      if (auth.identity !== undefined) {
+        throw new Error('dsh-feedback-bridge: github.auth both must not pin an identity; the user chooses the method');
+      }
+      config.auth = { provider: 'both' };
     } else if (auth.provider === 'fake') {
       const identity = auth.identity;
       if (identity === null || typeof identity !== 'object' || Array.isArray(identity)) {
@@ -247,7 +254,7 @@ export function normalizeGitHubConfig(raw: unknown): GitHubConfig {
       }
       config.auth = { provider: 'fake', identity: { login } };
     } else {
-      throw new Error('dsh-feedback-bridge: github.auth.provider must be "none", "fake", "gh", or "oauth"');
+      throw new Error('dsh-feedback-bridge: github.auth.provider must be "none", "fake", "gh", "oauth", or "both"');
     }
   }
   return config;
@@ -337,7 +344,7 @@ export function createGitHubService(config: GitHubConfig, deps: GitHubDeps): Git
     return createGhGitHubService(config, deps);
   }
   return {
-    async prepare() {
+    async prepare(_options) {
       const identity = identityOf(config);
       if (identity === null) {
         return { status: 'failed', code: 'authorization-required' };
@@ -460,7 +467,8 @@ function createGhGitHubService(config: GitHubConfig, deps: GitHubDeps): GitHubSe
     throw new Error('dsh-feedback-bridge: github.auth provider "gh" requires the gh runner dependency');
   }
   return {
-    async prepare(account) {
+    async prepare(options) {
+      const account = options?.account;
       const accounts = await gh.listAccounts();
       if (accounts.length === 0) {
         return { status: 'failed', code: 'authorization-required' };

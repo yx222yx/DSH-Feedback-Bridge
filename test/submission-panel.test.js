@@ -229,3 +229,16 @@ test('SubmitPanel shows a disconnect action on the final confirmation when oauth
   const { html } = renderPanel(readyState(), { onDisconnect() {} });
   assert.match(html, /data-testid="dsh-feedback-submission-oauth-disconnect"/);
 });
+test('SubmitPanel offers an explicit auth choice with both methods when a local gh account exists', () => {
+  const { html } = renderPanel({ phase: 'choose-auth', ghAvailable: true }, { onChooseGh() {}, onStartOAuth() {} });
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-choose"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-sign-in"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-gh-cli"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-export"/);
+});
+
+test('SubmitPanel hides the gh CLI choice when no local gh account exists', () => {
+  const { html } = renderPanel({ phase: 'choose-auth', ghAvailable: false }, { onStartOAuth() {} });
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-sign-in"/);
+  assert.doesNotMatch(html, /dsh-feedback-submission-oauth-gh-cli"/);
+});

@@ -11,6 +11,7 @@ export type SubmissionPrepareResult =
     destination: OfficialDestination;
   }
   | { status: 'account-selection-required'; accounts: { login: string }[] }
+  | { status: 'auth-method-required'; ghAvailable: boolean }
   | { status: 'failed'; code: GitHubSubmissionFailureCode };
 
 /** The confirm outcome: created with the permanent URL, a definite failure, or unknown. */
@@ -21,8 +22,8 @@ export type SubmissionConfirmOutcome =
 
 /** Serialized submission transport handle owned by the Client plugin. */
 export interface SubmissionTransport {
-  /** Read-only: resolve the prepared submission snapshot; the gh provider takes the explicitly selected account. */
-  prepare(account?: string): Promise<SubmissionPrepareResult>;
+  /** Read-only: resolve the prepared submission snapshot; the dual provider takes an explicit method and the gh provider an account. */
+  prepare(options?: { method?: 'gh' | 'oauth'; account?: string }): Promise<SubmissionPrepareResult>;
   /** The distinct final confirmation action: create exactly one Discussion. */
   confirm(input: { preparedId: string; title: string; body: string; categoryId: string }): Promise<SubmissionConfirmOutcome>;
 }
@@ -44,10 +45,11 @@ export function createSubmissionTransport({
   fetchImpl?: FetchLike;
 }): SubmissionTransport {
   return {
-    prepare(account) {
-      const url = account === undefined
-        ? submissionUrl
-        : submissionUrl + '?account=' + encodeURIComponent(account);
+    prepare(options) {
+      const params: string[] = [];
+      if (options?.method !== undefined) params.push('method=' + encodeURIComponent(options.method));
+      if (options?.account !== undefined) params.push('account=' + encodeURIComponent(options.account));
+      const url = params.length === 0 ? submissionUrl : submissionUrl + '?' + params.join('&');
       return fetchImpl(url, { method: 'GET' })
         .then((response) => {
           if (!response.ok) throw new Error('submission prepare failed: HTTP ' + response.status);

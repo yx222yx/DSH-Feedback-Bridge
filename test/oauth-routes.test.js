@@ -109,18 +109,19 @@ function createResponse() {
 }
 
 function oauthConfig(base, extra = {}) {
+  const { provider = 'oauth', ...oauthExtra } = extra;
   return {
     github: {
       graphqlEndpoint: base + '/graphql',
       timeoutMs: 300,
-      auth: { provider: 'oauth' },
+      auth: { provider },
       oauth: {
         clientId: 'client-route',
         deviceEndpoint: base + '/device',
         tokenEndpoint: base + '/token',
         userEndpoint: base + '/user',
         timeoutMs: 300,
-        ...extra,
+        ...oauthExtra,
       },
     },
   };
@@ -375,5 +376,94 @@ test('cancelling the device flow settles as cancelled, and disconnect returns to
     }
   } finally {
     fake.server.close();
+  }
+});
+
+/** Test-only fake `gh` shim with one stored account, served from a temp PATH dir. */
+const DUAL_GH_SHIM = [
+  '#!/usr/bin/env bash',
+  'set -e',
+  'if [ "$1" = "auth" ] && [ "$2" = "status" ]; then',
+  '  printf "github.com\n  ✓ Logged in to github.com account gh-user (/h.yml)\n  - Active account: true\n  - Token: gho_x\n"',
+  '  exit 0',
+  'fi',
+  'if [ "$1" = "auth" ] && [ "$2" = "token" ]; then',
+  '  echo "gho_dual-shim-token"',
+  '  exit 0',
+  'fi',
+  'echo "unexpected gh: $*" >&2',
+  'exit 1',
+  '',
+].join('\n');
+
+test('the dual provider requires an explicit auth choice, then honors both the gh and device flow methods', async () => {
+  const { mkdtempSync, rmSync, writeFileSync, chmodSync } = await import('node:fs');
+  const shimDir = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-gh-shim-'));
+  const shimPath = join(shimDir, 'gh');
+  writeFileSync(shimPath, DUAL_GH_SHIM);
+  chmodSync(shimPath, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = shimDir + (previousPath ? ':' + previousPath : '');
+  try {
+    const fake = await startFakeServer({ tokenScript: (n) => (n === 1 ? { error: 'authorization_pending' } : { access_token: 'gho_dual-oauth-token', scope: 'public_repo' }) });
+    const home = tempHome();
+    try {
+      const { harness, fiber, restore } = await loadOauth(home, oauthConfig(fake.base, { provider: 'both' }));
+      try {
+        const submissionRoute = harness.routes.get('/dsh-feedback-bridge/submission');
+        const startRoute = harness.routes.get('/dsh-feedback-bridge/oauth/start');
+        const statusRoute = harness.routes.get('/dsh-feedback-bridge/oauth/status');
+        assert.ok(submissionRoute && startRoute && statusRoute);
+
+        const choice = createResponse();
+        await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission' }), choice);
+        assert.deepEqual(JSON.parse(choice.body), { status: 'auth-method-required', ghAvailable: true });
+
+        const ghPrepare = createResponse();
+        await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission?method=gh' }), ghPrepare);
+        const ghPrepared = JSON.parse(ghPrepare.body);
+        assert.equal(ghPrepared.status, 'ready');
+        assert.deepEqual(ghPrepared.identity, { login: 'gh-user' });
+        const ghConfirm = createResponse();
+        await submissionRoute.handler(createRequest({
+          method: 'POST',
+          url: '/dsh-feedback-bridge/submission',
+          body: JSON.stringify({ preparedId: ghPrepared.preparedId, title: 't', body: 'b', categoryId: 'DIC_ideas' }),
+        }), ghConfirm);
+        assert.equal(JSON.parse(ghConfirm.body).status, 'created');
+        const ghMutation = fake.requests.find((request) => request.url?.startsWith('/graphql') && /mutation\s+CreateDiscussion/.test(request.body));
+        assert.ok(ghMutation);
+        assert.equal(ghMutation.headers.authorization, 'Bearer gho_dual-shim-token', 'the gh path must submit with the CLI token');
+
+        await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), createResponse());
+        const terminal = await waitForTerminal(statusRoute);
+        assert.equal(terminal.status, 'authorized');
+        assert.deepEqual(terminal.identity, { login: 'alice' });
+        const oauthPrepare = createResponse();
+        await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission?method=oauth' }), oauthPrepare);
+        const oauthPrepared = JSON.parse(oauthPrepare.body);
+        assert.equal(oauthPrepared.status, 'ready');
+        assert.deepEqual(oauthPrepared.identity, { login: 'alice' });
+        const oauthConfirm = createResponse();
+        await submissionRoute.handler(createRequest({
+          method: 'POST',
+          url: '/dsh-feedback-bridge/submission',
+          body: JSON.stringify({ preparedId: oauthPrepared.preparedId, title: 't', body: 'b', categoryId: 'DIC_ideas' }),
+        }), oauthConfirm);
+        assert.equal(JSON.parse(oauthConfirm.body).status, 'created');
+        const oauthMutations = fake.requests.filter((request) => request.url?.startsWith('/graphql') && /mutation\s+CreateDiscussion/.test(request.body));
+        assert.equal(oauthMutations.length, 2, 'one gh mutation and one oauth mutation');
+        assert.equal(oauthMutations[1].headers.authorization, 'Bearer gho_dual-oauth-token', 'the device path must submit with the grant token');
+      } finally {
+        restore();
+        await fiber.dispose().catch(() => {});
+        rmSync(home, { recursive: true, force: true });
+      }
+    } finally {
+      fake.server.close();
+    }
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(shimDir, { recursive: true, force: true });
   }
 });

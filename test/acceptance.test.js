@@ -1975,6 +1975,106 @@ test('final confirmation opens as a centered dialog without disturbing the edit 
     rmSync(tarballPath, { force: true });
   }
 });
+
+
+/** The profile patch layer enabling both Device Flow and the GitHub CLI path. */
+function githubDualPatch(oauthBase, githubBase) {
+  return [
+    '- id: dsh-feedback-bridge',
+    '  config:',
+    '    github:',
+    '      graphqlEndpoint: ' + githubBase + '/graphql',
+    '      timeoutMs: 5000',
+    '      auth:',
+    '        provider: both',
+    '      oauth:',
+    '        clientId: acceptance-device-client',
+    '        deviceEndpoint: ' + oauthBase + '/device',
+    '        tokenEndpoint: ' + oauthBase + '/token',
+    '        userEndpoint: ' + oauthBase + '/user',
+    '',
+  ].join('\n');
+}
+
+test('dual provider: the final confirmation offers an explicit auth choice and the GitHub CLI path submits with the selected account', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, writeFileSync, chmodSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-dual-'));
+  const shimDir = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-dual-shim-'));
+
+  const github = await startFakeGitHub();
+  const oauth = await startFakeDeviceOAuth();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubDualPatch(oauth.base, github.base));
+    const shimPath = join(shimDir, 'gh');
+    writeFileSync(shimPath, GH_SHIM);
+    chmodSync(shimPath, 0o755);
+    const cleanEnv = {
+      ...process.env,
+      DSH_HOME: dshHome,
+      DSH_TELEMETRY_MODE: 'DISABLED',
+      PATH: shimDir + (process.env.PATH ? ':' + process.env.PATH : ''),
+    };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-oauth-choose"]', { timeout: 20_000 });
+      // Both methods are offered when a local gh account exists.
+      assert.equal(await page.locator('[data-testid="dsh-feedback-submission-oauth-sign-in"]').count(), 1);
+      assert.equal(await page.locator('[data-testid="dsh-feedback-submission-oauth-gh-cli"]').count(), 1);
+      assert.equal(githubMutationCount(github.requests), 0, 'choosing must not mutate');
+
+      // Explicitly choose the GitHub CLI path: two accounts force a selection.
+      await page.click('[data-testid="dsh-feedback-submission-oauth-gh-cli"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-account-select"]', { timeout: 20_000 });
+      assert.equal(await page.locator('[data-testid^="dsh-feedback-submission-account-option-"]').count(), 2);
+      await page.check('[data-testid="dsh-feedback-submission-account-option-alice"]');
+      await page.click('[data-testid="dsh-feedback-submission-account-continue"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 20_000 });
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-account"]')).trim(), 'alice');
+      assert.equal(githubMutationCount(github.requests), 0, 'selecting an account must not mutate');
+
+      // The distinct confirm action creates exactly one mutation as the chosen account.
+      await page.click('[data-testid="dsh-feedback-submission-confirm"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-created"]', { timeout: 20_000 });
+      assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation per confirmation');
+      const mutation = github.requests.find((request) => /mutation\s+CreateDiscussion/.test(request.body));
+      assert.ok(mutation);
+      assert.equal(mutation.headers.authorization, 'Bearer gho_acceptance-secret-alice', 'the gh path must submit with the chosen CLI account token');
+
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    oauth.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
 /** Test-only fake `gh` shim served from a temp PATH directory: two stored github.com accounts with canned tokens. */
 const GH_SHIM = [
   '#!/usr/bin/env bash',

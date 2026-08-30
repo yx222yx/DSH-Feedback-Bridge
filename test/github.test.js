@@ -367,13 +367,13 @@ test('gh prepare honors an explicitly selected account and rejects an unknown on
   const fake = fakeFetchWithHeaders({ query: () => graphqlResponse(preparePayload()) });
   const service = createGitHubService({ ...BASE, ...ghAuthConfig() }, { fetchImpl: fake.impl, gh });
 
-  const ready = await service.prepare('bob');
+  const ready = await service.prepare({ account: 'bob' });
   assert.equal(ready.status, 'ready');
   if (ready.status !== 'ready') return;
   assert.equal(ready.identity.login, 'bob');
   assert.equal(fake.calls[0].headers.authorization, 'Bearer gho_contract-secret-bob');
 
-  const unknown = await service.prepare('mallory');
+  const unknown = await service.prepare({ account: 'mallory' });
   assert.deepEqual(unknown, {
     status: 'account-selection-required',
     accounts: [{ login: 'alice' }, { login: 'bob' }],
