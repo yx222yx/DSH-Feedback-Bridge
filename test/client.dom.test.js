@@ -431,3 +431,67 @@ test('feedback workspace renders English labels and English markdown headings wh
   assert.match(html, /## Scenario\n\nI want to call custom tools\./);
   assert.match(html, /Manual submission instructions/);
 });
+// ---------------------------------------------------------------------------
+// Issue #11: submission records panel renders stored records separately from drafts
+// ---------------------------------------------------------------------------
+
+const RECORD_FIXTURE = {
+  id: 'record-1',
+  title: 'Export a plugin draft',
+  url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/4242',
+  submittedAt: '2026-08-30T12:00:00.000Z',
+  account: 'fake-user',
+};
+
+test('records panel lists a stored record with the saved Discussion URL opening in a new tab', () => {
+  const html = renderComponent(moduleExports.RecordsPanel, { records: [RECORD_FIXTURE] }, 'zh');
+  assert.match(html, /data-testid="dsh-feedback-records"/);
+  assert.match(html, /提交记录/);
+  assert.match(html, /data-testid="dsh-feedback-record-record-1"/);
+  assert.match(html, /href="https:\/\/github\.com\/deepseek-ai\/deepseek-harness\/discussions\/4242"/);
+  assert.match(html, /target="_blank"/);
+  assert.match(html, /rel="noreferrer"/);
+  assert.match(html, /Export a plugin draft/);
+  assert.match(html, /提交账号: fake-user/);
+  assert.match(html, /提交时间:/);
+  assert.match(html, /data-testid="dsh-feedback-records-notracking"/);
+  assert.match(html, /v0.1 不跟踪/);
+});
+
+test('records panel renders the English no-tracking notice and labels in English', () => {
+  const html = renderComponent(moduleExports.RecordsPanel, { records: [RECORD_FIXTURE] }, 'en');
+  assert.match(html, /Submission records/);
+  assert.match(html, /Submitted as: fake-user/);
+  assert.match(html, /Submitted at:/);
+  assert.match(html, /v0\.1 does not track replies, edits, resolution, or other remote status/);
+});
+
+test('records panel renders an empty state when no records exist', () => {
+  const html = renderComponent(moduleExports.RecordsPanel, { records: [] }, 'zh');
+  assert.match(html, /data-testid="dsh-feedback-records"/);
+  assert.match(html, /data-testid="dsh-feedback-records-empty"/);
+  assert.match(html, /暂无提交记录/);
+  assert.doesNotMatch(html, /dsh-feedback-records-list/);
+});
+
+test('the workspace keeps submission records separate from the in-progress draft and shows the no-tracking notice', () => {
+  const draft = { ...moduleExports.emptyFeedbackDraft(), title: '草稿标题' };
+  const recordsTransport = { list: async () => [RECORD_FIXTURE] };
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), recordsTransport, onClose: () => {} }, 'zh');
+  // The draft area and the records section are distinct surfaces.
+  assert.match(html, /data-testid="dsh-feedback-draft-label">进行中的草稿<\/span>/);
+  assert.match(html, /data-testid="dsh-feedback-records"/);
+  assert.match(html, /提交记录/);
+  assert.match(html, /data-testid="dsh-feedback-records-notracking"/);
+  assert.match(html, /v0\.1 不跟踪/);
+  // The draft label never appears inside the records section.
+  const recordsSection = html.slice(html.indexOf('dsh-feedback-records'), html.indexOf('dsh-feedback-guidance'));
+  assert.doesNotMatch(recordsSection, /进行中的草稿/);
+});
+
+test('the workspace hides the records panel when no records transport is wired', () => {
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), onClose: () => {} }, 'zh');
+  assert.doesNotMatch(html, /dsh-feedback-records/);
+  assert.doesNotMatch(html, /提交记录/);
+});
+

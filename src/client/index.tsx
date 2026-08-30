@@ -29,7 +29,8 @@ import { createAssistTransport, effectiveLanguage } from './assist.js';
 import { createSimilarityTransport, similaritySignature } from './similarity.js';
 import { createOAuthTransport } from './oauth.js';
 import { createSubmissionTransport } from './submission.js';
-import { similarityUrl, submissionUrl } from './env.js';
+import { createRecordsTransport } from './records.js';
+import { recordsUrl, similarityUrl, submissionUrl } from './env.js';
 import { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
 import { SubmitPanel } from './components/SubmitPanel.js';
 
@@ -49,10 +50,12 @@ export { createAssistTransport, effectiveLanguage, revalidateRepairText } from '
 export { createSimilarityTransport, similaritySignature } from './similarity.js';
 export { createOAuthTransport } from './oauth.js';
 export { createSubmissionTransport } from './submission.js';
+export { createRecordsTransport } from './records.js';
 export { SubmitPanel } from './components/SubmitPanel.js';
 export { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
 export { FeedbackTrigger } from './components/FeedbackTrigger.js';
 export { FeedbackWorkspace } from './components/FeedbackWorkspace.js';
+export { RecordsPanel } from './components/RecordsPanel.js';
 export { SimilarityPanel } from './components/SimilarityPanel.js';
 export {
   applyRecommendations,
@@ -90,6 +93,8 @@ export type {
   SubmissionPanelState,
   SubmissionPrepareResult,
   SubmissionTransport,
+  RecordsTransport,
+  SubmissionRecord,
   DiscussionCategory,
   GitHubSubmissionFailureCode,
   OfficialDestination,
@@ -123,6 +128,7 @@ export function apply(ctx: ClientContext): void {
   const assistTransport = createAssistTransport({ assistUrl: assistUrl() });
   const similarityTransport = createSimilarityTransport({ similarityUrl: similarityUrl() });
   const submissionTransport = createSubmissionTransport({ submissionUrl: submissionUrl() });
+  const recordsTransport = createRecordsTransport({ recordsUrl: recordsUrl() });
   const oauthTransport = createOAuthTransport({
     statusUrl: '/dsh-feedback-bridge/oauth/status',
     startUrl: '/dsh-feedback-bridge/oauth/start',
@@ -139,7 +145,7 @@ export function apply(ctx: ClientContext): void {
         id: 'dsh-feedback-bridge',
         locale: NS,
       }, (props) => (
-        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} similarityTransport={similarityTransport} submissionTransport={submissionTransport} oauthTransport={oauthTransport} conversation={conversation} />
+        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} similarityTransport={similarityTransport} submissionTransport={submissionTransport} recordsTransport={recordsTransport} oauthTransport={oauthTransport} conversation={conversation} />
       ))),
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',

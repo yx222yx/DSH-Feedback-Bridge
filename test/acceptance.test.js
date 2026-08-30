@@ -1625,6 +1625,116 @@ test('fake-backed authorized submission: final preview shows exact fields, confi
 
 
 
+
+// ---------------------------------------------------------------------------
+// Issue #11: durable local submission records survive reload and reopen the
+// stored official Discussion URL
+// ---------------------------------------------------------------------------
+
+test('fake-backed submission records: a confirmed success persists a local record that survives reload, reopens the stored URL, and carries no draft content or credentials', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-records-'));
+  const recordsPath = join(dshHome, 'dsh-feedback-bridge', 'records.json');
+  const draftPath = join(dshHome, 'dsh-feedback-bridge', 'draft.json');
+
+  const github = await startFakeGitHub();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubPatch(github.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      const openWorkspace = async () => {
+        await page.click('[data-testid="dsh-feedback-trigger"]');
+        await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      };
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await openWorkspace();
+      await fillPublicDraft(page);
+
+      // Submit exactly one Discussion against the LOCAL fake GitHub server;
+      // the official repository is never contacted.
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 20_000 });
+      await page.click('[data-testid="dsh-feedback-submission-confirm"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-created"]', { timeout: 20_000 });
+      assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation per confirmation');
+
+      // The records panel lists the new record with the saved official URL.
+      await page.click('[data-testid="dsh-feedback-submission-back"]');
+      const recordLink = page.locator('[data-testid^="dsh-feedback-record-link-"]').first();
+      await recordLink.waitFor({ state: 'visible', timeout: 20_000 });
+      assert.equal(await recordLink.getAttribute('href'), 'https://github.com/deepseek-ai/deepseek-harness/discussions/7777');
+      assert.equal(await recordLink.getAttribute('target'), '_blank');
+      assert.equal((await recordLink.innerText()).trim(), 'Final preview test');
+      assert.match(await page.locator('[data-testid^="dsh-feedback-record-facts-"]').first().innerText(), /fake-user/);
+      assert.match(await page.locator('[data-testid="dsh-feedback-records-notracking"]').innerText(), /v0\.1 does not track/);
+
+      // The persisted record file carries only the public reference fields.
+      await waitForFile(recordsPath, () => existsSync(recordsPath) && readFileSync(recordsPath, 'utf8').includes('Final preview test'));
+      const onDisk = readFileSync(recordsPath, 'utf8');
+      assert.match(onDisk, /"version": 1/);
+      assert.match(onDisk, /https:\/\/github\.com\/deepseek-ai\/deepseek-harness\/discussions\/7777/);
+      assert.match(onDisk, /fake-user/);
+      assert.match(onDisk, /"submittedAt"/);
+      // No draft body, no scenario content, no credentials.
+      assert.doesNotMatch(onDisk, /I want to export a plugin draft|There is no public export flow/);
+      assert.doesNotMatch(onDisk, /gho_|access_token|Bearer/i);
+
+      // The draft file is separate and still carries the editable content.
+      await waitForFile(draftPath, () => existsSync(draftPath) && readFileSync(draftPath, 'utf8').includes('Final preview test'));
+      assert.match(readFileSync(draftPath, 'utf8'), /I want to export a plugin draft/);
+      assert.doesNotMatch(readFileSync(draftPath, 'utf8'), /discussions\/7777/);
+
+      // Reload: the record survives and reopens the stored URL from the GUI.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await openWorkspace();
+      const reloadedLink = page.locator('[data-testid^="dsh-feedback-record-link-"]').first();
+      await reloadedLink.waitFor({ state: 'visible', timeout: 20_000 });
+      assert.equal(await reloadedLink.getAttribute('href'), 'https://github.com/deepseek-ai/deepseek-harness/discussions/7777');
+
+      await browser.close();
+
+      // Zero external requests: the fake GitHub server is local only.
+      const external = requests.filter((url) => {
+        const host = new URL(url).hostname;
+        return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]';
+      });
+      assert.deepEqual(external, [], 'unexpected external requests: ' + external.join(', '));
+      assert.ok(!requests.some((url) => /github\.com/i.test(url)), 'a real GitHub request was observed');
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
 /** Start a local fake GitHub Device Flow server with a scriptable token endpoint and a verification page. */
 async function startFakeDeviceOAuth() {
   const { createServer } = await import('node:http');

@@ -1,4 +1,4 @@
-import { ASSIST_PATH, DRAFT_PATH, SIMILARITY_PATH, STATUS_PATH, SUBMISSION_PATH } from './constants.js';
+import { ASSIST_PATH, DRAFT_PATH, RECORDS_PATH, SIMILARITY_PATH, STATUS_PATH, SUBMISSION_PATH } from './constants.js';
 
 /**
  * Resolve the same-origin Host status route under the document base URL.
@@ -48,4 +48,14 @@ export function similarityUrl(): string {
 export function submissionUrl(): string {
   if (typeof document === 'undefined') return SUBMISSION_PATH;
   return new URL('dsh-feedback-bridge/submission', document.baseURI).pathname;
+}
+
+/**
+ * Resolve the same-origin Host records route under the document base URL.
+ *
+ * @returns the records route pathname.
+ */
+export function recordsUrl(): string {
+  if (typeof document === 'undefined') return RECORDS_PATH;
+  return new URL('dsh-feedback-bridge/records', document.baseURI).pathname;
 }

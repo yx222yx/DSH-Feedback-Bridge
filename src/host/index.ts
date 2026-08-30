@@ -29,6 +29,7 @@ import {
   type ConfirmSubmissionInput,
   type SubmissionStore,
 } from './submission.js';
+import { appendRecord, loadRecords, recordsFilePath } from './records.js';
 import {
   assertFeedbackType,
   assertLanguage,
@@ -53,6 +54,7 @@ const DRAFT_PATH = '/dsh-feedback-bridge/draft';
 const ASSIST_PATH = '/dsh-feedback-bridge/assist';
 const SIMILARITY_PATH = '/dsh-feedback-bridge/similarity';
 const SUBMISSION_PATH = '/dsh-feedback-bridge/submission';
+const RECORDS_PATH = '/dsh-feedback-bridge/records';
 const OAUTH_STATUS_PATH = '/dsh-feedback-bridge/oauth/status';
 const OAUTH_START_PATH = '/dsh-feedback-bridge/oauth/start';
 const OAUTH_CANCEL_PATH = '/dsh-feedback-bridge/oauth/cancel';
@@ -727,7 +729,44 @@ async function handleSubmissionConfirm(service: GitHubService, store: Submission
     repositoryId: prepared.repositoryId,
     identity: prepared.identity,
   });
+  if (outcome.status === 'created') {
+    try {
+      await appendRecord(recordsFilePath(), {
+        title: input.title,
+        url: outcome.url,
+        account: prepared.identity.login,
+      });
+    } catch {
+      // The Discussion already exists on GitHub; a failed local record write
+      // must not turn this response into a failure (that would invite a
+      // duplicate submission). The created link stays available in the panel.
+    }
+  }
   writeJson(response, 200, outcome);
+}
+
+/**
+ * Handle one request on the records route: GET lists the immutable local
+ * submission records (public title, permanent URL, submission time, and
+ * submission account); any other method is refused. Records are created only
+ * by a confirmed successful submission and offer no edit, delete, sync, or
+ * polling surface.
+ *
+ * @param request - the incoming request.
+ * @param response - the server response.
+ * @returns void.
+ */
+async function handleRecordsRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method !== 'GET') {
+    writeJson(response, 405, { error: 'method not allowed' }, { allow: 'GET' });
+    return;
+  }
+  try {
+    const records = await loadRecords(recordsFilePath());
+    writeJson(response, 200, { records });
+  } catch {
+    writeJson(response, 500, { error: 'failed to read the submission records' });
+  }
 }
 
 /**
@@ -975,6 +1014,13 @@ export function apply(ctx: Context, config?: PluginConfig): void {
       handler: createSubmissionRouteHandler(githubService, submissionStore),
     } satisfies WebRoute);
   }, 'dsh-feedback-bridge: submission route');
+  ctx.effect(() => {
+    return ctx.webServer.register({
+      kind: 'exact',
+      path: RECORDS_PATH,
+      handler: handleRecordsRequest,
+    } satisfies WebRoute);
+  }, 'dsh-feedback-bridge: records route');
   ctx.effect(() => {
     return ctx.webServer.register({
       kind: 'exact',

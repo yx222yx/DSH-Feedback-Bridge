@@ -25,6 +25,7 @@ test('npm pack ships exactly the intended runtime files and nothing else', () =>
     'lib/github.js',
     'lib/index.js',
     'lib/oauth.js',
+    'lib/records.js',
     'lib/similarity.js',
     'lib/submission.js',
     'lib/type-needs.js',

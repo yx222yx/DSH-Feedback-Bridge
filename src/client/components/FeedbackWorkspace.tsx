@@ -35,6 +35,8 @@ import { SimilarityPanel } from './SimilarityPanel.js';
 import { SubmitPanel, type SubmissionPanelState } from './SubmitPanel.js';
 import type { OAuthTransport } from '../oauth.js';
 import type { SubmissionTransport } from '../submission.js';
+import type { RecordsTransport, SubmissionRecord } from '../types.js';
+import { RecordsPanel } from './RecordsPanel.js';
 import type { SourceCopy } from '../sources.js';
 
 /** Debounce window before an edit triggers an autosave, in milliseconds. */
@@ -58,6 +60,8 @@ export interface FeedbackWorkspaceProps {
   similarityTransport: SimilarityTransport;
   /** Optional authorized-submission transport; the submit control appears only when wired. */
   submissionTransport?: SubmissionTransport;
+  /** Optional submission-records transport; the records panel appears only when wired. */
+  recordsTransport?: RecordsTransport;
   /** Optional oauth transport; present when the host runs the oauth provider. */
   oauthTransport?: OAuthTransport;
   /** Current-conversation source from `ctx.sessions`; null without a session service. */
@@ -96,7 +100,7 @@ function useConversationRead(source: ConversationSource | null | undefined): Con
  * that would overwrite a newer edit asks first. No action here performs a
  * GitHub write or any external network request.
  */
-export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, submissionTransport, oauthTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
+export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, submissionTransport, recordsTransport, oauthTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
   const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
   const [notice, setNotice] = React.useState<WorkspaceNotice | null>(null);
@@ -115,6 +119,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   const [authMethod, setAuthMethod] = React.useState<'gh' | 'oauth' | undefined>(undefined);
   const [submission, setSubmission] = React.useState<SubmissionPanelState>({ phase: 'preparing' });
   const [submissionCategory, setSubmissionCategory] = React.useState('');
+  const [records, setRecords] = React.useState<SubmissionRecord[]>([]);
   const seqRef = React.useRef(0);
   const controllerRef = React.useRef<AbortController | null>(null);
   const searchedRef = React.useRef<string | null>(null);
@@ -290,6 +295,24 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
     return () => window.clearTimeout(timer);
   }, [intentSignature, retryNonce, similarityTransport]);
 
+  // Load the immutable submission records once on mount; the read is
+  // auxiliary, so a failure leaves the panel empty instead of blocking the
+  // workspace or surfacing a transient error to the draft flow.
+  React.useEffect(() => {
+    if (recordsTransport === undefined) return undefined;
+    let cancelled = false;
+    recordsTransport.list()
+      .then((loaded) => {
+        if (!cancelled) setRecords(loaded);
+      })
+      .catch(() => {
+        // Swallows only the auxiliary records read; the workspace stays usable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [recordsTransport]);
+
   /** Re-run the similarity check for the same intent after a failure. */
   const retrySimilarity = () => {
     searchedRef.current = null;
@@ -454,8 +477,16 @@ const OAUTH_POLL_MS = 1000;
       categoryId: submissionCategory,
     })
       .then((outcome) => {
-        if (outcome.status === 'created') setSubmission({ phase: 'created', url: outcome.url });
-        else if (outcome.status === 'failed' && outcome.code !== 'unknown') {
+        if (outcome.status === 'created') {
+          setSubmission({ phase: 'created', url: outcome.url });
+          // Refresh the records panel immediately so the new record shows
+          // without reopening the workspace; the read is auxiliary.
+          if (recordsTransport !== undefined) {
+            recordsTransport.list()
+              .then((loaded) => setRecords(loaded))
+              .catch(() => {});
+          }
+        } else if (outcome.status === 'failed' && outcome.code !== 'unknown') {
           setSubmission({ phase: 'failed', code: outcome.code });
         } else {
           setSubmission({ phase: 'unknown' });
@@ -959,6 +990,7 @@ const OAUTH_POLL_MS = 1000;
           {!canExport ? (
             <p className="dsh-feedback-hint" data-testid="dsh-feedback-hint">{t('status.needTitle')}</p>
           ) : null}
+          {recordsTransport !== undefined ? <RecordsPanel t={t} records={records} /> : null}
           <section className="dsh-feedback-guidance" data-testid="dsh-feedback-guidance">
             <h3 className="dsh-feedback-section-title">{t('guidance.title')}</h3>
             <p className="dsh-feedback-destination">

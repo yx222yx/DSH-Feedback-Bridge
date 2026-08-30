@@ -183,6 +183,12 @@ export type FeedbackBridgeKey =
   | 'submission.unknown.guidance'
   | 'submission.guidance.reauth'
   | 'submission.guidance.scopes'
+  | 'records.title'
+  | 'records.empty'
+  | 'records.account'
+  | 'records.time'
+  | 'records.open'
+  | 'records.noTracking'
   | 'oauth.signIn'
   | 'oauth.choose'
   | 'oauth.ghCli'
@@ -294,6 +300,7 @@ export type { SimilarityFailureCode, SimilarityOutcome, SimilarityResult, Simila
 export type { DiscussionCategory, GitHubSubmissionFailureCode, OfficialDestination } from '../host/github.js';
 export type { SubmissionConfirmOutcome, SubmissionPrepareResult, SubmissionTransport } from './submission.js';
 export type { SubmissionPanelState } from './components/SubmitPanel.js';
+export type { RecordsTransport, SubmissionRecord } from './records.js';
 
 /** One read-only privacy finding; findings never rewrite content. */
 export interface PrivacyFinding {

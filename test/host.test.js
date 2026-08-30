@@ -99,11 +99,12 @@ test('host registers the status and draft routes through webServer and disposes 
   const harness = createHarness();
   const { fiber, restore } = await harness.load();
   try {
-    assert.equal(harness.routes.size, 6);
+    assert.equal(harness.routes.size, 7);
     assert.ok(harness.routes.has('/dsh-feedback-bridge/draft'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/assist'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/similarity'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/submission'));
+    assert.ok(harness.routes.has('/dsh-feedback-bridge/records'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/oauth/status'));
     const route = harness.routes.get('/dsh-feedback-bridge/status');
     assert.ok(route);
