@@ -1475,7 +1475,7 @@ async function startFakeGitHub({ swallowMutation = false } = {}) {
       body += chunk;
     });
     req.on('end', () => {
-      requests.push({ method: req.method, url: req.url, body });
+      requests.push({ method: req.method, url: req.url, body, headers: req.headers });
       const match = /(query|mutation)\s+(\w+)/.exec(body);
       const operation = match === null ? 'unknown' : match[2];
       if (operation === 'PrepareSubmission') {
@@ -1618,6 +1618,137 @@ test('fake-backed authorized submission: final preview shows exact fields, confi
   } finally {
     github.server.close();
     rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
+
+/** Test-only fake `gh` shim served from a temp PATH directory: two stored github.com accounts with canned tokens. */
+const GH_SHIM = [
+  '#!/usr/bin/env bash',
+  'set -e',
+  'if [ "$1" = "auth" ] && [ "$2" = "status" ]; then',
+  '  cat <<\'EOF\'',
+  'github.com',
+  '  ✓ Logged in to github.com account alice (/fake/hosts.yml)',
+  '  - Active account: true',
+  '  - Token: gho_acceptance-secret-alice',
+  "  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'",
+  '  ✓ Logged in to github.com account bob (/fake/hosts.yml)',
+  '  - Token: gho_acceptance-secret-bob',
+  'EOF',
+  '  exit 0',
+  'fi',
+  'if [ "$1" = "auth" ] && [ "$2" = "token" ]; then',
+  '  case "$4" in',
+  '    alice) echo "gho_acceptance-secret-alice" ;;',
+  '    bob) echo "gho_acceptance-secret-bob" ;;',
+  '    *) echo "unknown account: $4" >&2; exit 1 ;;',
+  '  esac',
+  '  exit 0',
+  'fi',
+  'echo "unexpected gh command: $*" >&2',
+  'exit 1',
+  '',
+].join('\n');
+
+/** The profile patch layer pointing the plugin's GitHub service at the fake server with the gh provider. */
+function githubGhPatch(base) {
+  return [
+    '- id: dsh-feedback-bridge',
+    '  config:',
+    '    github:',
+    '      graphqlEndpoint: ' + base + '/graphql',
+    '      timeoutMs: 2000',
+    '      auth:',
+    '        provider: gh',
+    '',
+  ].join('\n');
+}
+
+test('gh-backed submission: several GitHub CLI accounts force explicit selection, the chosen public account is shown at final confirmation, and the token never reaches the Client', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, writeFileSync, chmodSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-submission-gh-'));
+  const shimDir = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-gh-shim-'));
+
+  const github = await startFakeGitHub();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubGhPatch(github.base));
+    const shimPath = join(shimDir, 'gh');
+    writeFileSync(shimPath, GH_SHIM);
+    chmodSync(shimPath, 0o755);
+    const cleanEnv = {
+      ...process.env,
+      DSH_HOME: dshHome,
+      DSH_TELEMETRY_MODE: 'DISABLED',
+      PATH: shimDir + (process.env.PATH ? ':' + process.env.PATH : ''),
+    };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+
+      // No GitHub mutation may occur before the final confirmation.
+      assert.equal(githubMutationCount(github.requests), 0, 'no mutation before opening the confirmation');
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-account-select"]', { timeout: 20_000 });
+
+      // Two stored accounts force an explicit selection.
+      assert.equal(await page.locator('[data-testid^="dsh-feedback-submission-account-option-"]').count(), 2);
+      await page.check('[data-testid="dsh-feedback-submission-account-option-alice"]');
+      await page.click('[data-testid="dsh-feedback-submission-account-continue"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 20_000 });
+
+      // The chosen public account is shown again on the final confirmation.
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-account"]')).trim(), 'alice');
+      assert.equal(githubMutationCount(github.requests), 0, 'selecting an account must not mutate');
+
+      // The distinct confirm action creates exactly one Discussion as the selected account.
+      await page.click('[data-testid="dsh-feedback-submission-confirm"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-created"]', { timeout: 20_000 });
+      assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation per confirmation');
+      const mutation = github.requests.find((request) => /mutation\s+CreateDiscussion/.test(request.body));
+      assert.ok(mutation, 'the fake GitHub server must have received the mutation');
+      assert.equal(mutation.headers.authorization, 'Bearer gho_acceptance-secret-alice', 'the mutation runs as the selected account');
+      assert.ok(!/issues/i.test(mutation.url), 'the mutation targets only the official Discussions');
+
+      // The token never reaches the Client: not in page content and not in any browser request.
+      const pageContent = await page.content();
+      assert.ok(!pageContent.includes('gho_acceptance-secret-alice'), 'the token must never reach the Client DOM');
+      assert.ok(!pageContent.includes('gho_acceptance-secret-bob'), 'no account token may reach the Client DOM');
+      assert.ok(!requests.some((url) => url.includes('gho_acceptance')), 'the token must never appear in Client requests');
+
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(shimDir, { recursive: true, force: true });
     rmSync(tarballPath, { force: true });
   }
 });

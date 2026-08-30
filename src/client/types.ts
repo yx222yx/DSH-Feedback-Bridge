@@ -160,6 +160,8 @@ export type FeedbackBridgeKey =
   | 'similarity.failed.parse'
   | 'submission.title'
   | 'submission.account'
+  | 'submission.account.select'
+  | 'submission.account.continue'
   | 'submission.category'
   | 'submission.language'
   | 'submission.destination'
@@ -171,13 +173,16 @@ export type FeedbackBridgeKey =
   | 'submission.created'
   | 'submission.open'
   | 'submission.failed.authorization-required'
+  | 'submission.failed.authorization-expired'
   | 'submission.failed.permission-denied'
   | 'submission.failed.validation-rejected'
   | 'submission.failed.category-unavailable'
   | 'submission.failed.rate-limited'
   | 'submission.failed.network'
   | 'submission.unknown'
-  | 'submission.unknown.guidance';
+  | 'submission.unknown.guidance'
+  | 'submission.guidance.reauth'
+  | 'submission.guidance.scopes';
 
 /** Namespace-bound translate function delivered by the locale service. */
 export type T = TranslateNS<'dsh-feedback-bridge'>;

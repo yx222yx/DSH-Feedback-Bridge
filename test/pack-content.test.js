@@ -21,6 +21,7 @@ test('npm pack ships exactly the intended runtime files and nothing else', () =>
     'lib/client.js',
     'lib/draft-store.js',
     'lib/feedback-types.js',
+    'lib/gh-cli.js',
     'lib/github.js',
     'lib/index.js',
     'lib/similarity.js',

@@ -13,6 +13,7 @@ import {
   type SimilarityInput,
 } from './similarity.js';
 import { createGitHubService, normalizeGitHubConfig, type GitHubConfig, type GitHubService } from './github.js';
+import { createGhCli, createGhRun } from './gh-cli.js';
 import {
   createSubmissionStore,
   parseConfirmSubmission,
@@ -614,7 +615,9 @@ async function handleSimilarityRequest(config: SimilarityConfig, request: Incomi
 /**
  * Handle one GET request on the submission route: resolve the read-only
  * submission snapshot (identity, repository id, Discussion categories, and
- * the pinned official destination) and issue a one-shot prepared nonce.
+ * the pinned official destination) and issue a one-shot prepared nonce. The
+ * gh provider returns account-selection-required until the client chooses
+ * one of the discovered accounts via the `account` query parameter.
  * No mutation can occur on this path.
  *
  * @param service - the replaceable GitHub service.
@@ -628,9 +631,15 @@ async function handleSubmissionPrepare(service: GitHubService, store: Submission
     writeJson(response, 405, { error: 'method not allowed' }, { allow: 'GET, POST' });
     return;
   }
-  const result = await service.prepare();
+  const url = new URL(request.url ?? '/', 'http://dsh-feedback-bridge.local');
+  const account = url.searchParams.get('account');
+  const result = await service.prepare(account === null ? undefined : account);
   if (result.status === 'failed') {
     writeJson(response, 200, { status: 'failed', code: result.code });
+    return;
+  }
+  if (result.status === 'account-selection-required') {
+    writeJson(response, 200, { status: 'account-selection-required', accounts: result.accounts });
     return;
   }
   const preparedId = store.create({
@@ -701,6 +710,24 @@ async function handleSubmissionConfirm(service: GitHubService, store: Submission
 }
 
 /**
+ * Build the same-origin submission route handler over one replaceable GitHub
+ * service and one one-shot prepared-submission store: GET prepares the
+ * read-only snapshot, POST performs the single authorized mutation.
+ *
+ * @param service - the replaceable GitHub service.
+ * @param store - the one-shot prepared-submission store.
+ * @returns the route handler.
+ */
+export function createSubmissionRouteHandler(service: GitHubService, store: SubmissionStore) {
+  return (request: IncomingMessage, response: ServerResponse) => {
+    if (request.method === 'GET') {
+      return handleSubmissionPrepare(service, store, request, response);
+    }
+    return handleSubmissionConfirm(service, store, request, response);
+  };
+}
+
+/**
  * Handle one request on the draft route. GET reads the persisted draft; POST
  * saves or removes it; any other method is refused. Draft content never
  * leaves this handler in logs or status payloads.
@@ -768,6 +795,7 @@ export function apply(ctx: Context, config?: PluginConfig): void {
   const githubConfig: GitHubConfig = normalizeGitHubConfig(config?.github);
   const githubService = createGitHubService(githubConfig, {
     fetchImpl: (url, init) => fetch(url, init),
+    gh: createGhCli(createGhRun()),
   });
   const submissionStore = createSubmissionStore();
   ctx.effect(() => {
@@ -804,12 +832,7 @@ export function apply(ctx: Context, config?: PluginConfig): void {
     return ctx.webServer.register({
       kind: 'exact',
       path: SUBMISSION_PATH,
-      handler: (request, response) => {
-        if (request.method === 'GET') {
-          return handleSubmissionPrepare(githubService, submissionStore, request, response);
-        }
-        return handleSubmissionConfirm(githubService, submissionStore, request, response);
-      },
+      handler: createSubmissionRouteHandler(githubService, submissionStore),
     } satisfies WebRoute);
   }, 'dsh-feedback-bridge: submission route');
 }

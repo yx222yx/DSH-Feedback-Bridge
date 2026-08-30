@@ -134,10 +134,11 @@ function createHarness(dshHome, config) {
   };
 }
 
-function createRequest({ method = 'GET', body = null } = {}) {
+function createRequest({ method = 'GET', body = null, url = '/dsh-feedback-bridge/submission' } = {}) {
   const chunks = body === null ? [] : [Buffer.from(body)];
   return {
     method,
+    url,
     resume() {},
     [Symbol.asyncIterator]() {
       let index = 0;
@@ -489,4 +490,162 @@ test('confirm rejects invalid request bodies with 400 and no mutation', async ()
   } finally {
     fake.server.close();
   }
+});
+
+/**
+ * Fake gh runner used by the route-level gh provider tests: canned accounts
+ * and tokens with a call log.
+ */
+function fakeGh(accounts, tokens) {
+  const calls = [];
+  return {
+    calls,
+    async listAccounts() {
+      calls.push(['listAccounts']);
+      return accounts;
+    },
+    async tokenFor(login) {
+      calls.push(['tokenFor', login]);
+      const token = tokens[login];
+      if (token === undefined) throw new Error('no token for ' + login);
+      return token;
+    },
+  };
+}
+
+/** In-memory fake fetch recording every request including its headers. */
+function recordFetch() {
+  const requests = [];
+  return {
+    requests,
+    impl(url, init) {
+      requests.push({ url: String(url), body: String(init?.body ?? ''), headers: { ...(init?.headers ?? {}) } });
+      const match = /(query|mutation)\s+(\w+)/.exec(String(init?.body ?? ''));
+      const operation = match === null ? 'unknown' : match[2];
+      if (operation === 'PrepareSubmission') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => REPO_PAYLOAD,
+        });
+      }
+      if (operation === 'CreateDiscussion') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { createDiscussion: { discussion: { url: DISCUSSION_URL } } } }),
+        });
+      }
+      return Promise.reject(new Error('unexpected fetch: ' + String(init?.body)));
+    },
+  };
+}
+
+const GH_FAKE_TOKEN = 'gho_route-secret-alice';
+
+test('gh provider: prepare with several accounts returns account-selection-required and never fetches', async () => {
+  const { createGitHubService } = await import('../lib/github.js');
+  const { createSubmissionRouteHandler } = await import('../lib/index.js');
+  const { createSubmissionStore } = await import('../lib/submission.js');
+  const gh = fakeGh([
+    { login: 'alice', active: true },
+    { login: 'bob', active: false },
+  ], { alice: GH_FAKE_TOKEN, bob: 'gho_route-secret-bob' });
+  const fetch = recordFetch();
+  const service = createGitHubService(
+    { graphqlEndpoint: 'http://127.0.0.1:8123/graphql', timeoutMs: 300, auth: { provider: 'gh' } },
+    { fetchImpl: fetch.impl, gh },
+  );
+  const handler = createSubmissionRouteHandler(service, createSubmissionStore());
+  const response = createResponse();
+  await handler(createRequest({ method: 'GET' }), response);
+  assert.equal(response.code, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    status: 'account-selection-required',
+    accounts: [{ login: 'alice' }, { login: 'bob' }],
+  });
+  assert.equal(fetch.requests.length, 0, 'no GitHub request before an account is chosen');
+  assert.equal(mutationRequests(fetch.requests).length, 0);
+});
+
+test('gh provider: prepare with an explicitly selected account resolves read-only with that identity', async () => {
+  const { createGitHubService } = await import('../lib/github.js');
+  const { createSubmissionRouteHandler } = await import('../lib/index.js');
+  const { createSubmissionStore } = await import('../lib/submission.js');
+  const gh = fakeGh([
+    { login: 'alice', active: true },
+    { login: 'bob', active: false },
+  ], { alice: GH_FAKE_TOKEN, bob: 'gho_route-secret-bob' });
+  const fetch = recordFetch();
+  const service = createGitHubService(
+    { graphqlEndpoint: 'http://127.0.0.1:8123/graphql', timeoutMs: 300, auth: { provider: 'gh' } },
+    { fetchImpl: fetch.impl, gh },
+  );
+  const handler = createSubmissionRouteHandler(service, createSubmissionStore());
+  const response = createResponse();
+  await handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission?account=bob' }), response);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.status, 'ready');
+  assert.deepEqual(payload.identity, { login: 'bob' });
+  assert.ok(typeof payload.preparedId === 'string' && payload.preparedId !== '');
+  assert.equal(fetch.requests[0].headers.authorization, 'Bearer gho_route-secret-bob');
+  assert.equal(mutationRequests(fetch.requests).length, 0);
+});
+
+test('gh provider: confirm after an explicit account selection creates exactly one mutation as that account', async () => {
+  const { createGitHubService } = await import('../lib/github.js');
+  const { createSubmissionRouteHandler } = await import('../lib/index.js');
+  const { createSubmissionStore } = await import('../lib/submission.js');
+  const gh = fakeGh([
+    { login: 'alice', active: true },
+    { login: 'bob', active: false },
+  ], { alice: GH_FAKE_TOKEN, bob: 'gho_route-secret-bob' });
+  const fetch = recordFetch();
+  const service = createGitHubService(
+    { graphqlEndpoint: 'http://127.0.0.1:8123/graphql', timeoutMs: 300, auth: { provider: 'gh' } },
+    { fetchImpl: fetch.impl, gh },
+  );
+  const handler = createSubmissionRouteHandler(service, createSubmissionStore());
+
+  const prepare = createResponse();
+  await handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission?account=alice' }), prepare);
+  const prepared = JSON.parse(prepare.body);
+  assert.equal(prepared.status, 'ready');
+
+  const confirm = createResponse();
+  await handler(createRequest({
+    method: 'POST',
+    body: JSON.stringify(confirmBody({ preparedId: prepared.preparedId })),
+  }), confirm);
+  assert.equal(JSON.parse(confirm.body).status, 'created');
+
+  const mutations = mutationRequests(fetch.requests);
+  assert.equal(mutations.length, 1, 'exactly one mutation per confirm');
+  assert.equal(fetch.requests[1].headers.authorization, 'Bearer ' + GH_FAKE_TOKEN, 'the mutation runs as the selected account');
+  // The token never reaches any route response body.
+  assert.ok(!confirm.body.includes(GH_FAKE_TOKEN));
+  assert.ok(!prepare.body.includes(GH_FAKE_TOKEN));
+});
+
+test('gh provider: prepare with an unknown account returns account-selection-required again', async () => {
+  const { createGitHubService } = await import('../lib/github.js');
+  const { createSubmissionRouteHandler } = await import('../lib/index.js');
+  const { createSubmissionStore } = await import('../lib/submission.js');
+  const gh = fakeGh([
+    { login: 'alice', active: true },
+    { login: 'bob', active: false },
+  ], { alice: GH_FAKE_TOKEN, bob: 'gho_route-secret-bob' });
+  const fetch = recordFetch();
+  const service = createGitHubService(
+    { graphqlEndpoint: 'http://127.0.0.1:8123/graphql', timeoutMs: 300, auth: { provider: 'gh' } },
+    { fetchImpl: fetch.impl, gh },
+  );
+  const handler = createSubmissionRouteHandler(service, createSubmissionStore());
+  const response = createResponse();
+  await handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission?account=mallory' }), response);
+  assert.deepEqual(JSON.parse(response.body), {
+    status: 'account-selection-required',
+    accounts: [{ login: 'alice' }, { login: 'bob' }],
+  });
+  assert.equal(fetch.requests.length, 0);
 });

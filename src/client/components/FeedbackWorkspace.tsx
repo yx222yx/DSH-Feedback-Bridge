@@ -300,6 +300,10 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
     setSubmission({ phase: 'preparing' });
     submissionTransport.prepare()
       .then((result) => {
+        if (result.status === 'account-selection-required') {
+          setSubmission({ phase: 'select-account', accounts: result.accounts });
+          return;
+        }
         if (result.status === 'ready') {
           setSubmissionCategory((current) => (current !== '' && result.categories.some((category) => category.id === current)
             ? current
@@ -313,6 +317,37 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
           });
         } else if (result.code !== 'unknown') {
           // Prepare is read-only; the host never reports unknown for it.
+          setSubmission({ phase: 'failed', code: result.code });
+        } else {
+          setSubmission({ phase: 'failed', code: 'network' });
+        }
+      })
+      .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
+  };
+
+  /** Apply the explicitly selected gh account and resolve the read-only snapshot for it. */
+  const selectSubmissionAccount = (login: string) => {
+    if (submissionTransport === undefined) return;
+    userInteractedRef.current = true;
+    setSubmission({ phase: 'preparing' });
+    submissionTransport.prepare(login)
+      .then((result) => {
+        if (result.status === 'account-selection-required') {
+          setSubmission({ phase: 'select-account', accounts: result.accounts });
+          return;
+        }
+        if (result.status === 'ready') {
+          setSubmissionCategory((current) => (current !== '' && result.categories.some((category) => category.id === current)
+            ? current
+            : (result.categories[0]?.id ?? '')));
+          setSubmission({
+            phase: 'ready',
+            preparedId: result.preparedId,
+            identity: result.identity,
+            categories: result.categories,
+            destination: result.destination,
+          });
+        } else if (result.code !== 'unknown') {
           setSubmission({ phase: 'failed', code: result.code });
         } else {
           setSubmission({ phase: 'failed', code: 'network' });
@@ -822,6 +857,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
               categoryId={submissionCategory}
               onCategoryChange={setSubmissionCategory}
               onConfirm={confirmSubmission}
+              onAccountSelected={selectSubmissionAccount}
               onBack={closeSubmission}
               onExport={handleExport}
             />

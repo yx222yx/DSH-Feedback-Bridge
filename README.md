@@ -69,6 +69,21 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   GET requests. Per-source rate-limit, timeout, network, and parse failures
   are explained without blocking, and source endpoints are configurable
   (cordis.yml) for deployment and tests.
+- **Final preview and authorized submission (Issue #8 + #9)** expose one
+  replaceable Host-side GitHub service behind
+  `/dsh-feedback-bridge/submission`: GET prepares a read-only snapshot of the
+  official `deepseek-ai/deepseek-harness` Discussions destination and category
+  list, and POST performs exactly one `createDiscussion` mutation only after a
+  distinct final confirmation (a one-shot nonce makes a second confirm
+  impossible, and an unknown result is never retried). The shipped default
+  `github.auth.provider: none` reports no identity and keeps draft export.
+  The advanced **GitHub CLI** provider (`github.auth.provider: gh`) discovers
+  the stored `gh` accounts from `gh auth status`, forces an explicit account
+  choice whenever several exist, shows the chosen public login again at final
+  confirmation, and runs every request with that account's token in the
+  Host-to-GitHub Authorization header — the token is never returned to the
+  Client, the model, or logs. Missing or expired GitHub CLI authorization
+  surfaces `gh auth login` guidance plus the draft-export fallback.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
 
@@ -104,8 +119,11 @@ pnpm test        # builds lib/ from src/, then runs the full suite
 regenerates `lib/` (Host via tsc, Client bundle via esbuild) before running,
 so the suite always exercises the generated runtime artifacts. The acceptance
 tests pack the bundle, install it into a clean `DSH_HOME` Web
-profile, and boot DSH without a DeepSeek API key or GitHub account. They drive
-real headless-browser click-throughs of the left-navigation to export path
+profile, and boot DSH without a DeepSeek API key or GitHub account. The
+gh-backed submission acceptance test stands up a fake `gh` shim on PATH plus a
+local fake GraphQL server to drive account discovery, explicit selection, and
+the one-mutation confirm, and asserts the fake token never reaches the Client.
+They drive real headless-browser click-throughs of the left-navigation to export path
 (including Issue #6's model-assist flow: a test-only fake bundle intercepts the
 official `llm/stream` waterfall for hand-built calls to exercise structured
 success, malformed output, and provider failure deterministically, while one

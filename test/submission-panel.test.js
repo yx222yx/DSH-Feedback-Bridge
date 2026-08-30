@@ -158,3 +158,35 @@ test('SubmitPanel shows unknown-result guidance with export fallback and never a
   assert.doesNotMatch(html, /dsh-feedback-submission-confirm"/, 'an unknown result must never offer another submit');
   assert.doesNotMatch(html, /retry|Retry/i);
 });
+test('SubmitPanel forces an explicit account choice with a continue action when several accounts exist', () => {
+  const selected = [];
+  const { html } = renderPanel({
+    phase: 'select-account',
+    accounts: [{ login: 'alice' }, { login: 'bob' }],
+  }, {
+    onAccountSelected(login) {
+      selected.push(login);
+    },
+  });
+  assert.match(html, /data-testid="dsh-feedback-submission-account-select"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-account-option-alice"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-account-option-bob"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-account-continue"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-back"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-export"/);
+  assert.equal(selected.length, 0, 'no account may be submitted without the explicit continue action');
+});
+
+test('SubmitPanel explains an expired GitHub CLI authorization with correction guidance and the export fallback', () => {
+  const { html } = renderPanel({ phase: 'failed', code: 'authorization-expired' });
+  assert.match(html, /data-testid="dsh-feedback-submission-failed"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-failed-guidance"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-export"/);
+  assert.ok(html.includes(moduleExports.dictionaries.en['submission.failed.authorization-expired']), 'the localized expiry message must render');
+});
+
+test('SubmitPanel shows the selected public account again on the final confirmation', () => {
+  const { html } = renderPanel(readyState({ identity: { login: 'alice' } }));
+  assert.match(html, /data-testid="dsh-feedback-submission-account"/);
+  assert.match(html, /alice/);
+});
