@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { load, remove, save, resolveDshHome, draftFilePath, DRAFT_SCHEMA_VERSION, MAX_SOURCES, MAX_SOURCE_TEXT } from '../lib/draft-store.js';
@@ -324,6 +324,17 @@ test('resolveDshHome treats a blank DSH_HOME as unset', () => {
   process.env.DSH_HOME = '   ';
   try {
     assert.ok(resolveDshHome().endsWith(join('.dsh')));
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+  }
+});
+
+test('resolveDshHome expands a Windows-style tilde DSH_HOME under the OS home', () => {
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = '~\\dsh-profiles';
+  try {
+    assert.equal(resolveDshHome(), join(homedir(), 'dsh-profiles'));
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previous;

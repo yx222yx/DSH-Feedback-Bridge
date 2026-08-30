@@ -19,6 +19,17 @@ test('Host entry resolves through the package exports map with the plugin contra
   }
 });
 
+test('package metadata identifies the plugin and carries the dsh-plugin discovery keyword', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.name, 'dsh-feedback-bridge');
+  assert.ok(manifest.keywords.includes('dsh-plugin'), 'keywords must include the recommended dsh-plugin discovery topic');
+  assert.ok(manifest.keywords.includes('deepseek-harness'));
+  assert.equal(manifest.repository.type, 'git');
+  assert.equal(manifest.repository.url, 'git+https://github.com/yx222yx/DSH-Feedback-Bridge.git');
+  assert.equal(manifest.homepage, 'https://github.com/yx222yx/DSH-Feedback-Bridge');
+  assert.equal(manifest.bugs.url, 'https://github.com/yx222yx/DSH-Feedback-Bridge/issues');
+});
+
 test('client entry is the ModuleLoader bundle registered under the package id', () => {
   const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
   assert.match(source, /window\.__ModuleLoader__\.load\(\{/);

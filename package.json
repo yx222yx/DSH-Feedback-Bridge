@@ -2,8 +2,23 @@
   "name": "dsh-feedback-bridge",
   "version": "0.1.0",
   "description": "DSH Feedback Bridge（DSH 社区反馈桥）— a DeepSeek Harness plugin that helps users prepare privacy-aware community feedback.",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "feedback",
+    "github-discussions",
+    "privacy"
+  ],
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yx222yx/DSH-Feedback-Bridge.git"
+  },
+  "homepage": "https://github.com/yx222yx/DSH-Feedback-Bridge",
+  "bugs": {
+    "url": "https://github.com/yx222yx/DSH-Feedback-Bridge/issues"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",

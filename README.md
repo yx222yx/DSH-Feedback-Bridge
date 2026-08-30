@@ -3,130 +3,101 @@
 一个 DeepSeek Harness 插件，帮助用户将功能想法和错误反馈整理为清晰、注重隐私的 GitHub Discussions。
 A DeepSeek Harness plugin that helps users turn feature ideas and bug reports into clear, privacy-aware GitHub Discussions.
 
-## v0.1 slice (Issue #2, #3, and #4)
+## What it does
 
-The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
+The **社区反馈** (community feedback) entry in the DSH Web GUI left navigation opens a workspace that turns a conversation into a reviewable community submission for the official DeepSeek Harness GitHub Discussions:
 
-- Host plugin `dsh-feedback-bridge` loads once `webServer` is available and exposes
-  `GET /dsh-feedback-bridge/status` plus `GET|POST /dsh-feedback-bridge/draft`
-  (the draft route limits the JSON body size and rejects unexpected methods and
-  actions).
-- Client plugin registers a “DSH Feedback Bridge” status section in the Web GUI
-  settings surface (plugin status only) and reads the Host status through that
-  route.
-- A dedicated **社区反馈** left-navigation entry in the Web GUI sidebar opens the
-  community-feedback workspace: a custom-feedback draft with title, scenario,
-  your problem or situation, desired result, and additional context; an exact
-  Markdown review card; copy-to-clipboard and .md export; and manual submission
-  guidance linking to the official DeepSeek Harness Discussions.
-- The in-progress draft is persisted on the Host at
-  `<DSH_HOME>/dsh-feedback-bridge/draft.json` (schema `{version, title, scenario,
-  gap, desired, context, sources, updatedAt}`): edits autosave, a page reload or
-  DSH restart resumes the draft, closing flushes any pending save, and 取消 asks
-  for an explicit confirmation before discarding. Export always keeps the draft
-  (“已导出，草稿仍保留”). Corrupt or unknown-version files are quarantined instead
-  of silently overwritten; a confirmed discard can never be undone by a late
-  autosave. Copy, export, autosave, and discard make zero GitHub writes and zero
-  external network requests.
-- The workspace lists candidate **反馈来源** from the current conversation
-  (messages, tool results, turn errors, and a session-diagnostics block) through
-  the official `ctx.sessions` client face. Rule-based recommendations are
-  visibly badges and never select anything; only explicit user confirmation moves
-  a candidate into the persisted `sources` array (reviewed snapshot captured at
-  confirm time, capped at 16 KiB per source, 32 sources max). Removing a source
-  immediately stops it feeding draft preparation. The exported Markdown is built
-  only from the five reviewed public fields — raw messages, logs, and diagnostics
-  never enter it unexamined; advisory-only sensitive markers warn without
-  auto-blocking.
-- **Model-assisted drafting (Issue #6)** uses the model currently selected in
-  the conversation (`ctx.sessions` request-header config) through the official
-  Host `ctx.llm` seam — no plugin model selector, no plugin API key. The
-  workspace can generate suggestions (recommended feedback type + reason,
-  non-blocking missing-information notes scoped per feedback type, an editable
-  Chinese/English draft, advisory privacy findings) from the confirmed sources
-  only; the model output is staged and every application is an explicit
-  per-field action guarded by a field-version snapshot taken at request start,
-  so a suggestion never silently overwrites content the user established
-  during or before the request. Structured output is validated at runtime with
-  a repair panel for invalid/truncated responses (re-validation runs locally),
-  and provider failures surface distinct localized states with retry. Draft
-  schema v3 adds the authoritative feedback `type` (plugin request / Harness
-  feature suggestion / Harness defect report / custom) and the optional
-  submission `language` (English is the default only when unset). Privacy
-  findings are advisory and read-only: secrets, personal information, private
-  paths, confidential content, and excessive context are flagged but never
-  rewritten, redacted, or auto-published.
-- **Early read-only similarity check (Issue #7)** runs once the minimum
-  feedback intent exists (scenario, problem, and desired result all filled),
-  debounced and cancellable, against the approved v0.1 public sources only:
-  the official DeepSeek Harness Discussions (recent atom feed), official
-  `@deepseek-ai` npm packages, and a curated allowlist of official
-  documentation. Results are advisory links with a source badge and a concise
-  matched-terms reason; the plugin never declares a duplicate and never blocks
-  the workflow. The check sends only the minimal intent fields — no confirmed
-  sources, conversation content, or logs — through the same-origin
-  `/dsh-feedback-bridge/similarity` route, and the Host issues only read-only
-  GET requests. Per-source rate-limit, timeout, network, and parse failures
-  are explained without blocking, and source endpoints are configurable
-  (cordis.yml) for deployment and tests.
-- **Final preview and authorized submission (Issue #8 + #9)** expose one
-  replaceable Host-side GitHub service behind
-  `/dsh-feedback-bridge/submission`: GET prepares a read-only snapshot of the
-  official `deepseek-ai/deepseek-harness` Discussions destination and category
-  list, and POST performs exactly one `createDiscussion` mutation only after a
-  distinct final confirmation (a one-shot nonce makes a second confirm
-  impossible, and an unknown result is never retried). The shipped default
-  `github.auth.provider: none` reports no identity and keeps draft export.
-  The advanced **GitHub CLI** provider (`github.auth.provider: gh`) discovers
-  the stored `gh` accounts from `gh auth status`, forces an explicit account
-  choice whenever several exist, shows the chosen public login again at final
-  confirmation, and runs every request with that account's token in the
-  Host-to-GitHub Authorization header — the token is never returned to the
-  Client, the model, or logs. Missing or expired GitHub CLI authorization
-  surfaces `gh auth login` guidance plus the draft-export fallback.
-- **GUI GitHub OAuth Device Flow (Issue #10)** is the primary novice path:
-  the final confirmation offers **Sign in with GitHub**, the Host requests a
-  device code from GitHub with only the published public client ID (no client
-  secret, no callback route, no project backend), shows the verification URI
-  and user code in the dialog (with a copy action), polls GitHub's token
-  endpoint at its interval (handling pending, slow-down, expiry, denial,
-  insufficient `public_repo` scope, and failures distinctly), stores the
-  grant through the DSH credentials service
-  (`credentialKey('dsh-feedback-bridge', 'github-oauth')`), shows the
-  authorized public login again at final confirmation, and submits through the
-  same Issue #8 boundary. A disconnect action revokes the grant; cancellation
-  returns to draft export. The UI discloses that the DSH local credentials
-  provider is not an operating-system security boundary. Configure via
-  `github.auth.provider: oauth` plus `github.oauth.clientId` (and the
-  optional endpoint overrides) in the profile patch. A deployment that also
-  wants the advanced path sets `github.auth.provider: both`: the final
-  confirmation then asks the user to choose between **Sign in with GitHub**
-  and **Use GitHub CLI account** (shown only when a local gh login exists),
-  with an explicit selection on each side.
-- The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
-  version fails with a clear message.
+- **Draft** — a feedback draft with title, scenario, the problem or situation you encountered, desired result, and additional context, plus an exact Markdown review card.
+- **Sources** — candidate 反馈来源 (messages, tool results, turn errors, session diagnostics) from the current conversation; only explicitly confirmed sources feed draft preparation.
+- **Model-assisted drafting** — optional suggestions (feedback type + reason, missing-information notes, an editable Chinese/English draft, advisory privacy findings) using the model currently selected in your conversation.
+- **Similarity check** — a read-only, advisory search for related official Discussions, plugins, and documentation once the minimum feedback intent exists.
+- **Submit or export** — with GitHub authorization, submit to the official `deepseek-ai/deepseek-harness` Discussions after a distinct final confirmation; without authorization, export the exact Markdown draft with manual submission guidance.
 
-### Persistence known limitations
+## Supported versions
 
-- Only the DSH `web` profile is supported in v0.1. DSH exposes no reliable
-  profile-identity interface, so other profiles sharing the same `DSH_HOME` may
-  observe the same draft file.
-- Only one in-progress draft exists at a time; there is no draft history and no
-  submitted-record separation yet.
+- **DeepSeek Harness**: `>=0.1.1-rc.2 <0.2.0`. The plugin declares this range in its `dsh.compatibility.dsh` metadata and enforces it at boot: an incompatible or undetectable DSH version fails with a clear message before the web server opens.
+- **Profile**: the DSH `web` profile only.
+- **Environments**: WSL2 Ubuntu is the primary installation and acceptance environment. Native Windows receives focused compatibility validation (paths, GitHub CLI spawn, Device Flow/browser handoff, credential boundaries) without different product behavior.
 
 ## Install
+
+### WSL2 Ubuntu (primary)
 
 ```sh
 dsh plugin --profile web add ./dsh-feedback-bridge-0.1.0.tgz
 dsh --profile web --no-open --port 3080
 ```
 
-Open the Web GUI, select **社区反馈** in the left navigation to start or resume a
-custom-feedback draft, and use 复制草稿 / 导出草稿 to keep a copy with the manual
-submission instructions. `http://127.0.0.1:3080/dsh-feedback-bridge/status`
-shows the Host status payload.
+Open the Web GUI, select **社区反馈** in the left navigation to start or resume a draft, and use 复制草稿 / 导出草稿 to keep a copy with the manual submission instructions. `http://127.0.0.1:3080/dsh-feedback-bridge/status` shows the Host status payload.
 
-## Test
+### Native Windows
+
+The same two commands work on native Windows. Notes:
+
+- The in-progress draft and the submission records live under `<DSH_HOME>\dsh-feedback-bridge\`. On WSL2/Linux they are written with POSIX permissions `0600`/`0700`; on Windows the plugin relies on Node's rename-replacement semantics and makes no ACL-equivalence claim.
+- The GitHub CLI path spawns `gh` with `windowsHide` and never through a shell, and never inherits ambient `GH_TOKEN`/`GITHUB_TOKEN`/model credential environment variables.
+- Browser-assisted GitHub sign-in (Device Flow) hands off to GitHub's official device page in your default browser, exactly as on WSL2.
+
+## Using the workspace
+
+- Select **社区反馈** in the left navigation. The workspace opens with a custom-feedback draft; a previously saved draft is restored automatically.
+- Confirm conversation 反馈来源 you want to include; only confirmed sources are persisted and can feed draft preparation.
+- Fill the five public fields. The review card always shows the exact Markdown that will be copied, exported, or submitted.
+- Optional: run **model-assisted drafting** (uses the model currently selected in your conversation) and the early **similarity check** (advisory links; never blocks the workflow).
+- Use 复制草稿 to copy the exact Markdown to the clipboard or 导出草稿 to download `dsh-community-feedback-draft.md`. Export always keeps the draft (“已导出，草稿仍保留”).
+
+## Authorizing GitHub submission
+
+Without authorization the plugin keeps draft export only; `github.auth.provider: none` is the shipped default. Choose a provider under the plugin's `github.auth` config in the profile patch (`<DSH_HOME>/profiles/web/cordis.patch.yml`):
+
+### GitHub Device Flow (recommended novice path)
+
+`provider: oauth` plus `github.oauth.clientId` — the public client ID of a GitHub OAuth App (no client secret, no callback route, no project backend). The final confirmation offers **Sign in with GitHub**: the Host requests a device code, shows GitHub's verification URI and a short user code in the dialog (with a copy action), and polls GitHub's token endpoint at its interval (pending, slow-down, expiry, denial, insufficient `public_repo` scope, and failures are handled distinctly). The grant is stored through the DSH credentials service under `credentialKey('dsh-feedback-bridge', 'github-oauth')`.
+
+### GitHub CLI (advanced path)
+
+`provider: gh` — for users who already use the GitHub CLI. The plugin discovers the stored accounts from `gh auth status` (it never reads `git config`, repository metadata, or GitLab identity), forces an explicit account choice whenever several exist, and resolves the chosen account's token with `gh auth token -u <login>`. The token exists only in Host memory for one request; the plugin never runs `gh auth switch`, so your terminal-wide active account stays untouched. Missing or expired GitHub CLI authorization surfaces `gh auth login` guidance plus the draft-export fallback.
+
+### Both
+
+`provider: both` — the final confirmation asks you to choose between **Sign in with GitHub** and **Use GitHub CLI account** (the latter shown only when a local `gh` login exists), with an explicit selection on each side.
+
+Every provider shows the authorized public login again on the final confirmation before submission.
+
+## Submission outcomes
+
+After the distinct final confirmation (a one-shot nonce makes a second confirm impossible):
+
+- **Created** — the plugin shows the permanent Discussion link and stores a local submission record (title, link, submitting account, time) in the GUI; the records panel reopens the link any time.
+- **Unknown result** — the creation request was sent but the outcome could not be determined. The plugin never retries automatically, shows manual verification guidance (“check the official Discussions”), and keeps the draft exportable.
+- **Denied / expired / insufficient scope / failure** — distinct localized states with retry or cancel; denial and cancellation never create anything, and the draft export remains available.
+
+The mutation targets only the official `deepseek-ai/deepseek-harness` Discussions — never issues, never another repository, and only ever exactly one `createDiscussion` per confirmed submission.
+
+## Disconnect
+
+An authorized Device Flow session offers a **disconnect** action that revokes the stored OAuth grant. After disconnecting, the plugin returns to the sign-in step and draft export remains available. (The GitHub CLI path never changes your terminal-wide `gh` active account.)
+
+## Privacy limitations
+
+- **Local files** — the in-progress draft is persisted at `<DSH_HOME>/dsh-feedback-bridge/draft.json` and submission records at `<DSH_HOME>/dsh-feedback-bridge/records.json`. Draft content never enters logs or the status payload. On POSIX, files and directories are created with `0600`/`0700`; on Windows there is no ACL-equivalence claim.
+- **What leaves your machine** — confirmed sources only are sent to the model selected in your conversation (model-assisted drafting); the minimal intent fields only are sent read-only to the similarity sources (official Discussions feed, official `@deepseek-ai` npm registry data, a curated allowlist of official documentation); and only the five public draft fields, the feedback type, the submission language, and the chosen category are sent to GitHub on the single confirmed mutation. Raw messages, logs, and diagnostics never enter the exported or submitted Markdown unexamined.
+- **Credentials** — GitHub tokens (Device Flow grant or GitHub CLI account token) are held only on the Host for the duration of one request and are never returned to the Client, the model, or logs. The DSH local credentials provider is **not an operating-system security boundary** (the authorization dialog discloses this). The user code is shown only in the active authorization dialog.
+- **Profile scope** — only the DSH `web` profile is supported in v0.1. DSH exposes no reliable profile-identity interface, so other profiles sharing the same `DSH_HOME` may observe the same draft file.
+- **Advisory checks only** — sensitive markers on sources and privacy findings are advisory and read-only: they warn without auto-blocking, rewriting, redacting, or auto-publishing.
+
+## Recovery
+
+- **Draft** — edits autosave; a page reload or DSH restart resumes the in-progress draft with a “Restored your in-progress draft” notice. A corrupt or unknown-version draft file is quarantined beside the original rather than silently overwritten. Closing flushes any pending save; 取消 asks for an explicit confirmation before discarding, and a confirmed discard can never be undone by a late autosave.
+- **Submission records** — a confirmed success persists a local record that survives reloads and reopens the stored official Discussion URL; records carry no draft body and no credentials.
+- **Unknown submission result** — follow the in-dialog guidance and check the official Discussions manually.
+
+## Persistence known limitations
+
+- Only the DSH `web` profile is supported in v0.1. DSH exposes no reliable profile-identity interface, so other profiles sharing the same `DSH_HOME` may observe the same draft file.
+- Only one in-progress draft exists at a time; there is no draft history and no submitted-record separation yet.
+
+## Development
 
 ```sh
 pnpm install
@@ -134,19 +105,4 @@ pnpm typecheck   # strict check of the Host and Client source trees
 pnpm test        # builds lib/ from src/, then runs the full suite
 ```
 
-`src/` is the single authoritative TypeScript implementation; `pnpm test`
-regenerates `lib/` (Host via tsc, Client bundle via esbuild) before running,
-so the suite always exercises the generated runtime artifacts. The acceptance
-tests pack the bundle, install it into a clean `DSH_HOME` Web
-profile, and boot DSH without a DeepSeek API key or GitHub account. The
-gh-backed submission acceptance test stands up a fake `gh` shim on PATH plus a
-local fake GraphQL server to drive account discovery, explicit selection, and
-the one-mutation confirm, and asserts the fake token never reaches the Client.
-They drive real headless-browser click-throughs of the left-navigation to export path
-(including Issue #6's model-assist flow: a test-only fake bundle intercepts the
-official `llm/stream` waterfall for hand-built calls to exercise structured
-success, malformed output, and provider failure deterministically, while one
-real credentialless path asserts graceful model-failed degradation) and assert
-zero GitHub and zero external network requests. The browser acceptance test
-requires Playwright's Chromium; install it once with
-`pnpm exec playwright-core install chromium`.
+`src/` is the single authoritative TypeScript implementation; `pnpm test` regenerates `lib/` (Host via tsc, Client bundle via esbuild) before running, so the suite always exercises the generated runtime artifacts. The acceptance tests pack the bundle, install it into a clean `DSH_HOME` Web profile, and boot DSH without a DeepSeek API key or GitHub account. The gh-backed submission acceptance test stands up a fake `gh` shim on PATH plus a local fake GraphQL server to drive account discovery, explicit selection, and the one-mutation confirm, and asserts the fake token never reaches the Client. The Device Flow acceptance test intercepts the browser handoff to a fake device page and never contacts real GitHub. The tests drive real headless-browser click-throughs of the left-navigation to export path (including Issue #6's model-assist flow: a test-only fake bundle intercepts the official `llm/stream` waterfall for hand-built calls to exercise structured success, malformed output, and provider failure deterministically, while one real credentialless path asserts graceful model-failed degradation) and assert zero GitHub and zero external network requests. The browser acceptance test requires Playwright's Chromium; install it once with `pnpm exec playwright-core install chromium`.
