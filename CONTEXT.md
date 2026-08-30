@@ -1,4 +1,4 @@
-# DSH Feedback Bridge（DSH 社区反馈桥）
+# DSH Feedback Bridge（DSH 社区反馈）
 
 DSH Feedback Bridge 是一个独立社区插件，帮助 DeepSeek Harness 用户把对话中的需求、缺陷或求助整理成可审阅的社区反馈，并根据用户是否完成 GitHub 授权选择提交或导出。
 

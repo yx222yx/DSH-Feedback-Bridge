@@ -1,23 +1,28 @@
-# Contributing
+# Contributing / 参与贡献
 
-English | [中文](CONTRIBUTING.zh.md)
+Thank you for helping improve DSH Feedback Bridge. 感谢你帮助改进 DSH 社区反馈。
 
-Thank you for your interest in contributing to DeepSeek Harness!
+## Report a problem or suggest an improvement
 
-We deeply believe in the power of open source communities, and that belief has shaped this project from the very beginning.
+Open a [GitHub Issue](https://github.com/yx222yx/DSH-Feedback-Bridge/issues) and include:
 
-DeepSeek Harness is still at an early stage and under active development. We are sorry that we cannot accept external pull requests at the moment. However, contributing code to this repository is far from the only way to help. There are many other ways to get involved:
+- what you expected;
+- what happened instead;
+- your DeepSeek Harness and plugin versions;
+- steps or a small example that reproduces the problem;
+- logs or screenshots only after removing credentials and private content.
 
-- Identify and report issues or bugs in GitHub Discussions:
-  - Upvote discussions that you would like to bring to the team's attention. We are a very small team and may not be able to reply to every post, but we monitor them and consider them when allocating resources.
-- Contribute to the ecosystem:
-  - Create a plugin that excites you and share it with others:
-    - Associate your GitHub project with the `dsh-plugin` topic to help others discover your plugin.
-  - Write blog posts and how-to guides about DeepSeek Harness.
-  - Answer questions and help other members of the community.
+如需报告问题或提出建议，请创建 GitHub Issue，并说明预期结果、实际情况、版本和复现步骤。上传日志或截图前，请先删除凭据和隐私内容。
 
-DeepSeek Harness is designed to be deeply customizable. We do not believe that packages in the official repository are inherently more important than packages created by the community. You may consider this repository an idea, an official showcase, and a source of inspiration, but not a mandate from us.
+## Code changes
 
-We have already seen exciting projects emerge from the community, and we hope to see the ecosystem continue to grow in its own directions.
+Before changing code, read the root `AGENTS.md`, `CONTEXT.md`, and the relevant decisions under `docs/adr/`.
 
-Into the unknown.
+Production code is TypeScript under `src/`. Tests may remain JavaScript. Keep each change focused and run:
+
+```sh
+pnpm typecheck
+pnpm test
+```
+
+Do not use real GitHub writes or real model credentials in automated tests. Every direct Discussion submission must remain behind an explicit final user confirmation.

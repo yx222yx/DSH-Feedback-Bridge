@@ -215,8 +215,8 @@ export const dictionaries: Record<LocaleId, LocaleDictOf<typeof NS>> = {
   },
   zh: {
     nav: '社区反馈',
-    'settings.label': 'DSH 社区反馈桥',
-    title: 'DSH 社区反馈桥',
+    'settings.label': 'DSH 社区反馈',
+    title: 'DSH 社区反馈',
     loading: '正在加载状态…',
     errorPrefix: '状态不可用：',
     statusPrefix: '状态：',

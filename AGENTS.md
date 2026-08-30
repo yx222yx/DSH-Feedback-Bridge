@@ -1,6 +1,6 @@
 # DSH Feedback Bridge
 
-DSH Feedback Bridge（DSH 社区反馈桥）is a DeepSeek Harness plugin that helps users turn feature ideas and bug reports into clear, privacy-aware GitHub Discussions.
+DSH Feedback Bridge（DSH 社区反馈）is a DeepSeek Harness plugin that helps users turn feature ideas and bug reports into clear, privacy-aware GitHub Discussions.
 
 ## Before making changes
 

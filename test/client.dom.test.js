@@ -89,7 +89,7 @@ test('status section renders as real DOM markup in English by default', () => {
 test('status section renders as real DOM markup in Chinese', () => {
   const html = renderSection('zh');
   assert.match(html, /data-testid="dsh-feedback-bridge-status"/);
-  assert.match(html, /DSH 社区反馈桥/);
+  assert.match(html, /DSH 社区反馈/);
   assert.match(html, /正在加载状态…/);
 });
 
