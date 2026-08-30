@@ -12,6 +12,13 @@ import {
   type SimilarityConfig,
   type SimilarityInput,
 } from './similarity.js';
+import { createGitHubService, normalizeGitHubConfig, type GitHubConfig, type GitHubService } from './github.js';
+import {
+  createSubmissionStore,
+  parseConfirmSubmission,
+  type ConfirmSubmissionInput,
+  type SubmissionStore,
+} from './submission.js';
 import {
   assertFeedbackType,
   assertLanguage,
@@ -35,6 +42,7 @@ const STATUS_PATH = '/dsh-feedback-bridge/status';
 const DRAFT_PATH = '/dsh-feedback-bridge/draft';
 const ASSIST_PATH = '/dsh-feedback-bridge/assist';
 const SIMILARITY_PATH = '/dsh-feedback-bridge/similarity';
+const SUBMISSION_PATH = '/dsh-feedback-bridge/submission';
 
 /** Hard cap on the draft request body: a draft is five text fields. */
 const MAX_DRAFT_BODY_BYTES = 1 << 20;
@@ -507,9 +515,10 @@ async function handleAssistRequest(ctx: Context, request: IncomingMessage, respo
   }
 }
 
-/** Plugin configuration: currently only the read-only similarity settings. */
+/** Plugin configuration: read-only similarity settings and the replaceable GitHub service settings. */
 export interface PluginConfig {
   similarity?: unknown;
+  github?: unknown;
 }
 
 /** The three intent fields the similarity route requires, in stable order. */
@@ -601,6 +610,96 @@ async function handleSimilarityRequest(config: SimilarityConfig, request: Incomi
   }
 }
 
+
+/**
+ * Handle one GET request on the submission route: resolve the read-only
+ * submission snapshot (identity, repository id, Discussion categories, and
+ * the pinned official destination) and issue a one-shot prepared nonce.
+ * No mutation can occur on this path.
+ *
+ * @param service - the replaceable GitHub service.
+ * @param store - the one-shot prepared-submission store.
+ * @param request - the incoming request.
+ * @param response - the server response.
+ * @returns void.
+ */
+async function handleSubmissionPrepare(service: GitHubService, store: SubmissionStore, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method !== 'GET') {
+    writeJson(response, 405, { error: 'method not allowed' }, { allow: 'GET, POST' });
+    return;
+  }
+  const result = await service.prepare();
+  if (result.status === 'failed') {
+    writeJson(response, 200, { status: 'failed', code: result.code });
+    return;
+  }
+  const preparedId = store.create({
+    identity: result.identity,
+    repositoryId: result.repositoryId,
+    categories: result.categories,
+    destination: result.destination,
+  });
+  writeJson(response, 200, {
+    status: 'ready',
+    preparedId,
+    identity: result.identity,
+    categories: result.categories,
+    destination: result.destination,
+  });
+}
+
+/**
+ * Handle one POST request on the submission route: the distinct final
+ * confirmation action. The prepared snapshot is consumed exactly once (a
+ * second use returns 409) before the single createDiscussion mutation runs;
+ * the category must come from the prepared list, and the outcome is created,
+ * failed, or unknown with no automatic retry.
+ *
+ * @param service - the replaceable GitHub service.
+ * @param store - the one-shot prepared-submission store.
+ * @param request - the incoming request.
+ * @param response - the server response.
+ * @returns void.
+ */
+async function handleSubmissionConfirm(service: GitHubService, store: SubmissionStore, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method !== 'POST') {
+    writeJson(response, 405, { error: 'method not allowed' }, { allow: 'GET, POST' });
+    return;
+  }
+  let body: unknown;
+  try {
+    body = await readJsonBody(request);
+  } catch (error) {
+    if ((error as HttpError).statusCode === 413) request.resume?.();
+    writeJson(response, (error as HttpError).statusCode ?? 400, { error: (error as Error).message });
+    return;
+  }
+  let input: ConfirmSubmissionInput;
+  try {
+    input = parseConfirmSubmission(body);
+  } catch (error) {
+    writeJson(response, 400, { error: (error as Error).message });
+    return;
+  }
+  const prepared = store.take(input.preparedId);
+  if (prepared === null) {
+    writeJson(response, 409, { error: 'prepared submission unknown or already used' });
+    return;
+  }
+  if (!prepared.categories.some((category) => category.id === input.categoryId)) {
+    writeJson(response, 200, { status: 'failed', code: 'category-unavailable' });
+    return;
+  }
+  const outcome = await service.createDiscussion({
+    title: input.title,
+    body: input.body,
+    categoryId: input.categoryId,
+    repositoryId: prepared.repositoryId,
+    identity: prepared.identity,
+  });
+  writeJson(response, 200, outcome);
+}
+
 /**
  * Handle one request on the draft route. GET reads the persisted draft; POST
  * saves or removes it; any other method is refused. Draft content never
@@ -666,6 +765,11 @@ async function handleDraftRequest(request: IncomingMessage, response: ServerResp
 export function apply(ctx: Context, config?: PluginConfig): void {
   assertCompatibleDsh();
   const similarityConfig = normalizeSimilarityConfig(config?.similarity);
+  const githubConfig: GitHubConfig = normalizeGitHubConfig(config?.github);
+  const githubService = createGitHubService(githubConfig, {
+    fetchImpl: (url, init) => fetch(url, init),
+  });
+  const submissionStore = createSubmissionStore();
   ctx.effect(() => {
     return ctx.webServer.register({
       kind: 'exact',
@@ -696,4 +800,16 @@ export function apply(ctx: Context, config?: PluginConfig): void {
       handler: (request, response) => handleSimilarityRequest(similarityConfig, request, response),
     } satisfies WebRoute);
   }, 'dsh-feedback-bridge: similarity route');
+  ctx.effect(() => {
+    return ctx.webServer.register({
+      kind: 'exact',
+      path: SUBMISSION_PATH,
+      handler: (request, response) => {
+        if (request.method === 'GET') {
+          return handleSubmissionPrepare(githubService, submissionStore, request, response);
+        }
+        return handleSubmissionConfirm(githubService, submissionStore, request, response);
+      },
+    } satisfies WebRoute);
+  }, 'dsh-feedback-bridge: submission route');
 }

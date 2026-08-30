@@ -1460,3 +1460,229 @@ test('a rate-limited similarity source is explained without blocking the feedbac
     rmSync(tarballPath, { force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Issue #8: final preview and authorized submission behind a fake GitHub
+// ---------------------------------------------------------------------------
+
+/** Start a local fake GitHub GraphQL server that records every request and answers per scenario. */
+async function startFakeGitHub({ swallowMutation = false } = {}) {
+  const { createServer } = await import('node:http');
+  const requests = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      requests.push({ method: req.method, url: req.url, body });
+      const match = /(query|mutation)\s+(\w+)/.exec(body);
+      const operation = match === null ? 'unknown' : match[2];
+      if (operation === 'PrepareSubmission') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: {
+            repository: {
+              id: 'R_kgDOfficialRepo',
+              discussionCategories: {
+                nodes: [
+                  { id: 'DIC_ideas', name: 'Ideas' },
+                  { id: 'DIC_qna', name: 'Q&A' },
+                ],
+              },
+            },
+          },
+        }));
+        return;
+      }
+      if (operation === 'CreateDiscussion') {
+        if (swallowMutation) return; // record but never respond -> unknown
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: { createDiscussion: { discussion: { url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/7777' } } },
+        }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = 'http://127.0.0.1:' + (address === null || typeof address === 'string' ? '0' : address.port);
+  return { server, requests, base };
+}
+
+/** The profile patch layer pointing the plugin's GitHub service at the fake server and fake account. */
+function githubPatch(base) {
+  return [
+    '- id: dsh-feedback-bridge',
+    '  config:',
+    '    github:',
+    '      graphqlEndpoint: ' + base + '/graphql',
+    '      timeoutMs: 2000',
+    '      auth:',
+    '        provider: fake',
+    '        identity:',
+    '          login: fake-user',
+    '',
+  ].join('\n');
+}
+
+/** Count recorded mutation requests (the only write the plugin may issue). */
+function githubMutationCount(requests) {
+  return requests.filter((request) => /mutation\s+CreateDiscussion/.test(request.body)).length;
+}
+
+/** Fill the five public draft fields and wait for the debounced autosave. */
+async function fillPublicDraft(page) {
+  await page.fill('[data-testid="dsh-feedback-title"]', 'Final preview test');
+  await page.fill('[data-testid="dsh-feedback-scenario"]', 'I want to export a plugin draft.');
+  await page.fill('[data-testid="dsh-feedback-gap"]', 'There is no public export flow.');
+  await page.fill('[data-testid="dsh-feedback-desired"]', 'A documented export plugin flow.');
+  await page.fill('[data-testid="dsh-feedback-context"]', 'User stories and sample code.');
+  await page.waitForTimeout(1200);
+}
+
+test('fake-backed authorized submission: final preview shows exact fields, confirm creates exactly one Discussion mutation, and the permanent URL is returned without touching issues', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-submission-ok-'));
+
+  const github = await startFakeGitHub();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubPatch(github.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+
+      // Opening the final confirmation performs no GitHub mutation.
+      assert.equal(githubMutationCount(github.requests), 0, 'no mutation before opening the confirmation');
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 20_000 });
+
+      // The final preview shows the exact title, Markdown body, category,
+      // language, official destination, and submission account.
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-title"]')).trim(), 'Final preview test');
+      assert.match(await page.textContent('[data-testid="dsh-feedback-submission-body"]'), /# Final preview test/);
+      assert.equal(await page.inputValue('[data-testid="dsh-feedback-submission-category"]'), 'DIC_ideas');
+      assert.match(await page.textContent('[data-testid="dsh-feedback-submission-language"]'), /English/);
+      assert.match(await page.textContent('[data-testid="dsh-feedback-submission-destination"]'), /deepseek-ai\/deepseek-harness/);
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-account"]')).trim(), 'fake-user');
+      assert.equal(githubMutationCount(github.requests), 0, 'viewing the confirmation must not mutate');
+
+      // The distinct confirm action creates exactly one Discussion.
+      await page.click('[data-testid="dsh-feedback-submission-confirm"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-created"]', { timeout: 20_000 });
+      const link = await page.getAttribute('[data-testid="dsh-feedback-submission-created-link"]', 'href');
+      assert.equal(link, 'https://github.com/deepseek-ai/deepseek-harness/discussions/7777');
+      assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation per confirmation');
+
+      // The mutation targeted only the official Discussions, never Issues.
+      assert.ok(github.requests.length >= 2, 'the fake GitHub server must have been reached');
+      assert.ok(github.requests.every((request) => !/issues/i.test(request.body) && !/issues/i.test(request.url)));
+
+      await browser.close();
+      const external = requests.filter((url) => {
+        const host = new URL(url).hostname;
+        return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]';
+      });
+      assert.deepEqual(external, [], 'unexpected external requests: ' + external.join(', '));
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
+test('fake-backed submission: an unknown result performs exactly one mutation, never retries, and keeps the draft exportable', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-submission-unknown-'));
+
+  const github = await startFakeGitHub({ swallowMutation: true });
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubPatch(github.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 20_000 });
+      await page.click('[data-testid="dsh-feedback-submission-confirm"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-unknown"]', { timeout: 30_000 });
+
+      // Manual verification guidance is shown and no retry control exists.
+      assert.match(await page.textContent('[data-testid="dsh-feedback-submission-unknown-guidance"]'), /Check the official Discussions|前往官方 Discussions/);
+      assert.equal(await page.locator('[data-testid="dsh-feedback-submission-confirm"]').count(), 0, 'an unknown result must never offer another submit');
+
+      // Exactly one mutation attempt, and no automatic retry ever arrives.
+      assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation attempt');
+      await page.waitForTimeout(4500);
+      assert.equal(githubMutationCount(github.requests), 1, 'an unknown result must never retry automatically');
+
+      // The reviewed draft stays exportable from the unknown panel.
+      const downloadPromise = page.waitForEvent('download');
+      await page.click('[data-testid="dsh-feedback-submission-export"]');
+      const download = await downloadPromise;
+      const exported = readFileSync(await download.path(), 'utf8');
+      assert.match(exported, /# Final preview test/);
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+

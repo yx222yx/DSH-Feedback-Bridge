@@ -32,6 +32,8 @@ import type {
 import { NOTICE_STATUS } from '../types.js';
 import { ROLE_LABEL_KEYS, SourcePanel } from './SourcePanel.js';
 import { SimilarityPanel } from './SimilarityPanel.js';
+import { SubmitPanel, type SubmissionPanelState } from './SubmitPanel.js';
+import type { SubmissionTransport } from '../submission.js';
 import type { SourceCopy } from '../sources.js';
 
 /** Debounce window before an edit triggers an autosave, in milliseconds. */
@@ -53,6 +55,8 @@ export interface FeedbackWorkspaceProps {
   persistence: import('../types.js').DraftPersistence;
   assistTransport: AssistTransport;
   similarityTransport: SimilarityTransport;
+  /** Optional authorized-submission transport; the submit control appears only when wired. */
+  submissionTransport?: SubmissionTransport;
   /** Current-conversation source from `ctx.sessions`; null without a session service. */
   conversation: ConversationSource | null;
   onClose: () => void;
@@ -89,7 +93,7 @@ function useConversationRead(source: ConversationSource | null | undefined): Con
  * that would overwrite a newer edit asks first. No action here performs a
  * GitHub write or any external network request.
  */
-export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
+export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, submissionTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
   const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
   const [notice, setNotice] = React.useState<WorkspaceNotice | null>(null);
@@ -104,6 +108,9 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   const [confirmOverwrite, setConfirmOverwrite] = React.useState<FeedbackFieldKey | null>(null);
   const [similarity, setSimilarity] = React.useState<SimilarityPanelState>({ phase: 'idle' });
   const [retryNonce, setRetryNonce] = React.useState(0);
+  const [submissionOpen, setSubmissionOpen] = React.useState(false);
+  const [submission, setSubmission] = React.useState<SubmissionPanelState>({ phase: 'preparing' });
+  const [submissionCategory, setSubmissionCategory] = React.useState('');
   const seqRef = React.useRef(0);
   const controllerRef = React.useRef<AbortController | null>(null);
   const searchedRef = React.useRef<string | null>(null);
@@ -283,6 +290,62 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   const retrySimilarity = () => {
     searchedRef.current = null;
     setRetryNonce((nonce) => nonce + 1);
+  };
+
+  /** Open the final confirmation panel and resolve the read-only submission snapshot. */
+  const openSubmission = () => {
+    if (submissionTransport === undefined) return;
+    userInteractedRef.current = true;
+    setSubmissionOpen(true);
+    setSubmission({ phase: 'preparing' });
+    submissionTransport.prepare()
+      .then((result) => {
+        if (result.status === 'ready') {
+          setSubmissionCategory((current) => (current !== '' && result.categories.some((category) => category.id === current)
+            ? current
+            : (result.categories[0]?.id ?? '')));
+          setSubmission({
+            phase: 'ready',
+            preparedId: result.preparedId,
+            identity: result.identity,
+            categories: result.categories,
+            destination: result.destination,
+          });
+        } else if (result.code !== 'unknown') {
+          // Prepare is read-only; the host never reports unknown for it.
+          setSubmission({ phase: 'failed', code: result.code });
+        } else {
+          setSubmission({ phase: 'failed', code: 'network' });
+        }
+      })
+      .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
+  };
+
+  /** The distinct final confirmation action; sends exactly one mutation. */
+  const confirmSubmission = () => {
+    if (submissionTransport === undefined) return;
+    if (submission.phase !== 'ready' || submissionCategory === '') return;
+    setSubmission({ phase: 'confirming' });
+    submissionTransport.confirm({
+      preparedId: submission.preparedId,
+      title: fields.title.trim(),
+      body: markdown,
+      categoryId: submissionCategory,
+    })
+      .then((outcome) => {
+        if (outcome.status === 'created') setSubmission({ phase: 'created', url: outcome.url });
+        else if (outcome.status === 'failed' && outcome.code !== 'unknown') {
+          setSubmission({ phase: 'failed', code: outcome.code });
+        } else {
+          setSubmission({ phase: 'unknown' });
+        }
+      })
+      .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
+  };
+
+  /** Leave the panel; no mutation has run. */
+  const closeSubmission = () => {
+    setSubmissionOpen(false);
   };
 
   /** Toggle one source row between preview and full text. */
@@ -749,9 +812,28 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
             <pre className="dsh-feedback-preview" data-testid="dsh-feedback-preview">{markdown}</pre>
           </section>
           </div>
+          {submissionOpen ? (
+            <SubmitPanel
+              t={t}
+              state={submission}
+              title={fields.title}
+              body={markdown}
+              language={fields.language ?? 'en'}
+              categoryId={submissionCategory}
+              onCategoryChange={setSubmissionCategory}
+              onConfirm={confirmSubmission}
+              onBack={closeSubmission}
+              onExport={handleExport}
+            />
+          ) : null}
         </div>
         <footer className="dsh-feedback-footer">
           <div className="dsh-feedback-actions">
+            {submissionTransport !== undefined ? (
+              <button type="button" className="dsh-feedback-action dsh-feedback-action-primary" data-testid="dsh-feedback-submission-open" disabled={!canExport || submissionOpen} onClick={openSubmission}>
+                {t('submission.submit')}
+              </button>
+            ) : null}
             <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-copy" disabled={!canExport} onClick={handleCopy}>
               {t('action.copy')}
             </button>

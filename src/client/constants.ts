@@ -13,6 +13,9 @@ export const ASSIST_PATH = '/dsh-feedback-bridge/assist';
 /** Host similarity route path, used before a document base URL is available. */
 export const SIMILARITY_PATH = '/dsh-feedback-bridge/similarity';
 
+/** Host submission route path (GET prepares, POST confirms), used before a document base URL is available. */
+export const SUBMISSION_PATH = '/dsh-feedback-bridge/submission';
+
 /**
  * Non-localized product-policy constant: the official DeepSeek Harness
  * GitHub Discussions destination for manual submission guidance. Kept out

@@ -157,7 +157,27 @@ export type FeedbackBridgeKey =
   | 'similarity.failed.rate-limited'
   | 'similarity.failed.timeout'
   | 'similarity.failed.network'
-  | 'similarity.failed.parse';
+  | 'similarity.failed.parse'
+  | 'submission.title'
+  | 'submission.account'
+  | 'submission.category'
+  | 'submission.language'
+  | 'submission.destination'
+  | 'submission.confirm'
+  | 'submission.submit'
+  | 'submission.back'
+  | 'submission.export'
+  | 'submission.submitting'
+  | 'submission.created'
+  | 'submission.open'
+  | 'submission.failed.authorization-required'
+  | 'submission.failed.permission-denied'
+  | 'submission.failed.validation-rejected'
+  | 'submission.failed.category-unavailable'
+  | 'submission.failed.rate-limited'
+  | 'submission.failed.network'
+  | 'submission.unknown'
+  | 'submission.unknown.guidance';
 
 /** Namespace-bound translate function delivered by the locale service. */
 export type T = TranslateNS<'dsh-feedback-bridge'>;
@@ -250,6 +270,9 @@ export interface DraftPersistence {
 
 export type { PrivacyKind as PrivacyFindingKind, PrivacySeverity } from '../host/assist-schema.js';
 export type { SimilarityFailureCode, SimilarityOutcome, SimilarityResult, SimilaritySourceKind, SimilaritySourceState } from '../host/similarity.js';
+export type { DiscussionCategory, GitHubSubmissionFailureCode, OfficialDestination } from '../host/github.js';
+export type { SubmissionConfirmOutcome, SubmissionPrepareResult, SubmissionTransport } from './submission.js';
+export type { SubmissionPanelState } from './components/SubmitPanel.js';
 
 /** One read-only privacy finding; findings never rewrite content. */
 export interface PrivacyFinding {
