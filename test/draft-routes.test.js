@@ -25,6 +25,13 @@ function createHarness(dshHome) {
         ctx.provide('webServer', webServer);
         ctx.provide('sessions', { get() { return undefined; } });
         ctx.provide('llm', { stream() { return []; } });
+        ctx.provide('credentials', {
+          async readRecord() { return undefined; },
+          async modifyRecord() { return undefined; },
+          async deleteRecord() {},
+          async describeRecord() { return { configured: false, writable: true }; },
+          async listRecords() { return []; },
+        });
       });
       await provider;
       const previousHome = process.env.DSH_HOME;

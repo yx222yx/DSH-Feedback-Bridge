@@ -29,6 +29,13 @@ function createHarness({ dshVersion = '0.1.1-rc.2', routes = new Map() } = {}) {
         ctx.provide('webServer', webServer);
         ctx.provide('sessions', { get() { return undefined; } });
         ctx.provide('llm', { stream() { return []; } });
+        ctx.provide('credentials', {
+          async readRecord() { return undefined; },
+          async modifyRecord() { return undefined; },
+          async deleteRecord() {},
+          async describeRecord() { return { configured: false, writable: true }; },
+          async listRecords() { return []; },
+        });
       });
       await provider;
       const previous = process.env.DSH_VERSION;
@@ -45,7 +52,7 @@ function createHarness({ dshVersion = '0.1.1-rc.2', routes = new Map() } = {}) {
 
 test('declares the documented DSH Web host injection', () => {
   assert.equal(name, 'dsh-feedback-bridge');
-  assert.deepEqual(inject, ['webServer', 'sessions', 'llm']);
+  assert.deepEqual(inject, ['webServer', 'sessions', 'llm', 'credentials']);
 });
 
 test('declared DSH compatibility range accepts the target Web profile and rejects incompatible versions', () => {
@@ -92,11 +99,12 @@ test('host registers the status and draft routes through webServer and disposes 
   const harness = createHarness();
   const { fiber, restore } = await harness.load();
   try {
-    assert.equal(harness.routes.size, 5);
+    assert.equal(harness.routes.size, 6);
     assert.ok(harness.routes.has('/dsh-feedback-bridge/draft'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/assist'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/similarity'));
     assert.ok(harness.routes.has('/dsh-feedback-bridge/submission'));
+    assert.ok(harness.routes.has('/dsh-feedback-bridge/oauth/status'));
     const route = harness.routes.get('/dsh-feedback-bridge/status');
     assert.ok(route);
     assert.equal(route.kind, 'exact');
@@ -144,6 +152,13 @@ test('an incompatible DSH version fails before any route is registered', async (
     });
     ctx.provide('sessions', { get() { return undefined; } });
     ctx.provide('llm', { stream() { return []; } });
+    ctx.provide('credentials', {
+      async readRecord() { return undefined; },
+      async modifyRecord() { return undefined; },
+      async deleteRecord() {},
+      async describeRecord() { return { configured: false, writable: true }; },
+      async listRecords() { return []; },
+    });
   });
   const previous = process.env.DSH_VERSION;
   process.env.DSH_VERSION = '0.0.9';

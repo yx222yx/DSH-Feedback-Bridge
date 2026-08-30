@@ -1623,6 +1623,229 @@ test('fake-backed authorized submission: final preview shows exact fields, confi
 });
 
 
+
+
+/** Start a local fake GitHub OAuth server: an approve/deny authorize page, a token endpoint, and the user endpoint. */
+async function startFakeOAuth() {
+  const { createServer } = await import('node:http');
+  const requests = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      requests.push({ url: req.url, body });
+      if (req.url?.startsWith('/access_token')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          access_token: 'gho_acceptance-oauth-secret',
+          refresh_token: 'ghr_acceptance-oauth-secret',
+          expires_in: 3600,
+          scope: 'repo',
+        }));
+        return;
+      }
+      if (req.url?.startsWith('/user')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ login: 'alice' }));
+        return;
+      }
+      if (req.url?.startsWith('/authorize')) {
+        const url = new URL(req.url, 'http://127.0.0.1');
+        const state = url.searchParams.get('state');
+        const redirect = url.searchParams.get('redirect_uri');
+        res.writeHead(200, { 'content-type': 'text/html' });
+        res.end([
+          '<!doctype html><html><body>',
+          '<a id="approve" href="' + redirect + '?code=acceptance-oauth-code&state=' + state + '">Approve</a>',
+          '<a id="deny" href="' + redirect + '?error=access_denied&state=' + state + '">Deny</a>',
+          '</body></html>',
+        ].join(''));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = 'http://127.0.0.1:' + (address === null || typeof address === 'string' ? '0' : address.port);
+  return { server, requests, base };
+}
+
+/** The profile patch layer pointing the plugin at the fake OAuth and GitHub services with the oauth provider. */
+function githubOauthPatch(oauthBase, githubBase) {
+  return [
+    '- id: dsh-feedback-bridge',
+    '  config:',
+    '    github:',
+    '      graphqlEndpoint: ' + githubBase + '/graphql',
+    '      timeoutMs: 2000',
+    '      auth:',
+    '        provider: oauth',
+    '      oauth:',
+    '        clientId: acceptance-client',
+    '        authorizeEndpoint: ' + oauthBase + '/authorize',
+    '        tokenEndpoint: ' + oauthBase + '/access_token',
+    '        userEndpoint: ' + oauthBase + '/user',
+    '',
+  ].join('\n');
+}
+
+test('oauth-backed submission: the GUI signs in through a browser handoff, shows the public identity at final confirmation, and the token never reaches the Client', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-oauth-ok-'));
+
+  const github = await startFakeGitHub();
+  const oauth = await startFakeOAuth();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubOauthPatch(oauth.base, github.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+
+      // Opening the confirmation offers the sign-in step with the disclosure.
+      assert.equal(githubMutationCount(github.requests), 0, 'no mutation before authorization');
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
+      assert.match(await page.textContent('[data-testid="dsh-feedback-submission-oauth-disclosure"]'), /credentials provider|凭据/);
+
+      // Sign in: the browser hands off to the fake authorize page.
+      const popupPromise = page.waitForEvent('popup');
+      await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-oauth-authorizing"]', { timeout: 20_000 });
+      const popup = await popupPromise;
+      await popup.waitForSelector('#approve', { timeout: 20_000 });
+      await popup.click('#approve');
+
+      // The main page polls to authorized and shows the public identity.
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 30_000 });
+      assert.equal((await page.textContent('[data-testid="dsh-feedback-submission-account"]')).trim(), 'alice');
+      assert.equal(githubMutationCount(github.requests), 0, 'authorizing must not mutate');
+
+      // The distinct confirm action creates exactly one Discussion as the authorized account.
+      await page.click('[data-testid="dsh-feedback-submission-confirm"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-created"]', { timeout: 20_000 });
+      assert.equal(githubMutationCount(github.requests), 1, 'exactly one mutation per confirmation');
+      const mutation = github.requests.find((request) => /mutation\s+CreateDiscussion/.test(request.body));
+      assert.ok(mutation);
+      assert.equal(mutation.headers.authorization, 'Bearer gho_acceptance-oauth-secret', 'the mutation runs as the stored grant');
+
+      // No token, code, or verifier ever reaches the Client.
+      const pageContent = await page.content();
+      assert.ok(!pageContent.includes('gho_acceptance-oauth-secret'), 'the token must never reach the Client DOM');
+      assert.ok(!pageContent.includes('acceptance-oauth-code'), 'the authorization code must never reach the Client DOM');
+      assert.ok(!requests.some((url) => url.includes('gho_acceptance-oauth') || url.includes('acceptance-oauth-code')));
+
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    oauth.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
+test('oauth-backed submission: denial settles as a distinct failure with zero mutation, and disconnect returns to draft export', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-oauth-deny-'));
+
+  const github = await startFakeGitHub();
+  const oauth = await startFakeOAuth();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubOauthPatch(oauth.base, github.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
+
+      // Deny in the browser handoff: distinct failure, zero mutation.
+      const denyPopupPromise = page.waitForEvent('popup');
+      await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
+      const denyPopup = await denyPopupPromise;
+      await denyPopup.waitForSelector('#deny', { timeout: 20_000 });
+      await denyPopup.click('#deny');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-oauth-failed"]', { timeout: 30_000 });
+      assert.match(await page.textContent('[data-testid="dsh-feedback-submission-oauth-failed"]'), /declined|拒绝/);
+      assert.equal(githubMutationCount(github.requests), 0, 'a denial must never mutate');
+
+      // Retry, approve, then disconnect: the grant is revoked and export remains.
+      await page.click('[data-testid="dsh-feedback-submission-oauth-retry"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
+      const okPopupPromise = page.waitForEvent('popup');
+      await page.click('[data-testid="dsh-feedback-submission-oauth-sign-in"]');
+      const okPopup = await okPopupPromise;
+      await okPopup.waitForSelector('#approve', { timeout: 20_000 });
+      await okPopup.click('#approve');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-ready"]', { timeout: 30_000 });
+
+      await page.click('[data-testid="dsh-feedback-submission-oauth-disconnect"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-open"]', { timeout: 20_000 });
+      assert.equal(await page.locator('[data-testid="dsh-feedback-submission-export"]').count(), 1, 'draft export must remain after disconnect');
+      assert.equal(githubMutationCount(github.requests), 0, 'disconnect must never mutate');
+
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    oauth.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
 /** Test-only fake `gh` shim served from a temp PATH directory: two stored github.com accounts with canned tokens. */
 const GH_SHIM = [
   '#!/usr/bin/env bash',

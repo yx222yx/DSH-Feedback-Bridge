@@ -27,6 +27,22 @@ export interface GhCli {
   tokenFor(login: string): Promise<string>;
 }
 
+/** The stored GitHub OAuth grant the submission provider reads back from the credentials service. */
+export interface OAuthGrantPayload {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  login: string;
+  scopes: string;
+}
+
+/** The credential seam behind the oauth provider: read, write, and clear the stored grant. */
+export interface GitHubGrantStore {
+  readGrant(): Promise<OAuthGrantPayload | undefined>;
+  writeGrant(payload: OAuthGrantPayload): Promise<void>;
+  clearGrant(): Promise<void>;
+}
+
 /** The pinned official repository; never configurable, never another repo. */
 export const OFFICIAL_DISCUSSION_OWNER = 'deepseek-ai';
 /** The pinned official repository; never configurable, never another repo. */
@@ -61,7 +77,8 @@ export interface GitHubIdentity {
 export type GitHubAuthConfig =
   | { provider: 'none' }
   | { provider: 'fake'; identity: GitHubIdentity }
-  | { provider: 'gh' };
+  | { provider: 'gh' }
+  | { provider: 'oauth' };
 
 /** Deployment-varying GitHub service settings; defaults in {@link DEFAULT_GITHUB_CONFIG}. */
 export interface GitHubConfig {
@@ -123,7 +140,7 @@ export interface GitHubFetchResponse {
 export interface GitHubDeps {
   fetchImpl(
     url: string,
-    init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal },
+    init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal },
   ): Promise<GitHubFetchResponse>;
   /** The gh runner; required only when the auth provider is `gh`. */
   gh?: GhCli;
@@ -138,7 +155,7 @@ export interface GitHubService {
 }
 
 /** Structured failure carrying the wire-meaningful code for read (prepare) requests. */
-class GitHubReadError extends Error {
+export class GitHubReadError extends Error {
   readonly code: GitHubSubmissionFailureCode;
   constructor(code: GitHubSubmissionFailureCode, message: string) {
     super(code + ': ' + message);
@@ -147,7 +164,7 @@ class GitHubReadError extends Error {
 }
 
 /** GraphQL operation resolving the official repository id and its Discussion categories. */
-const PREPARE_QUERY = `query PrepareSubmission($owner: String!, $name: String!) {
+export const PREPARE_QUERY = `query PrepareSubmission($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     id
     discussionCategories(first: 20) {
@@ -157,7 +174,7 @@ const PREPARE_QUERY = `query PrepareSubmission($owner: String!, $name: String!) 
 }`;
 
 /** The single mutation operation; the only write this module can issue. */
-const CREATE_DISCUSSION_MUTATION = `mutation CreateDiscussion($input: CreateDiscussionInput!) {
+export const CREATE_DISCUSSION_MUTATION = `mutation CreateDiscussion($input: CreateDiscussionInput!) {
   createDiscussion(input: $input) {
     discussion { url }
   }
@@ -178,7 +195,7 @@ export function normalizeGitHubConfig(raw: unknown): GitHubConfig {
     throw new Error('dsh-feedback-bridge: github config must be an object');
   }
   const record = raw as Record<string, unknown>;
-  const known = new Set(['graphqlEndpoint', 'timeoutMs', 'auth']);
+  const known = new Set(['graphqlEndpoint', 'timeoutMs', 'auth', 'oauth']);
   for (const key of Object.keys(record)) {
     if (!known.has(key)) {
       throw new Error('dsh-feedback-bridge: unknown github config key ' + key);
@@ -214,6 +231,11 @@ export function normalizeGitHubConfig(raw: unknown): GitHubConfig {
         throw new Error('dsh-feedback-bridge: github.auth gh must not pin an identity; the account is selected at runtime');
       }
       config.auth = { provider: 'gh' };
+    } else if (auth.provider === 'oauth') {
+      if (auth.identity !== undefined) {
+        throw new Error('dsh-feedback-bridge: github.auth oauth must not pin an identity; the grant is resolved at runtime');
+      }
+      config.auth = { provider: 'oauth' };
     } else if (auth.provider === 'fake') {
       const identity = auth.identity;
       if (identity === null || typeof identity !== 'object' || Array.isArray(identity)) {
@@ -225,7 +247,7 @@ export function normalizeGitHubConfig(raw: unknown): GitHubConfig {
       }
       config.auth = { provider: 'fake', identity: { login } };
     } else {
-      throw new Error('dsh-feedback-bridge: github.auth.provider must be "none", "fake", or "gh"');
+      throw new Error('dsh-feedback-bridge: github.auth.provider must be "none", "fake", "gh", or "oauth"');
     }
   }
   return config;
@@ -237,7 +259,7 @@ function identityOf(config: GitHubConfig): GitHubIdentity | null {
 }
 
 /** Build the GraphQL POST init shared by every request. */
-function postInit(body: string, config: GitHubConfig): { method: string; headers: Record<string, string>; body: string; signal: AbortSignal } {
+export function postInit(body: string, config: GitHubConfig): { method: string; headers: Record<string, string>; body: string; signal: AbortSignal } {
   return {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -247,7 +269,7 @@ function postInit(body: string, config: GitHubConfig): { method: string; headers
 }
 
 /** Classify an HTTP status from a mutation response. */
-function mutationHttpCode(status: number): GitHubSubmissionFailureCode {
+export function mutationHttpCode(status: number): GitHubSubmissionFailureCode {
   if (status === 429) return 'rate-limited';
   if (status === 401) return 'authorization-required';
   if (status === 403) return 'permission-denied';
@@ -280,7 +302,7 @@ function graphqlErrorCode(errors: readonly { type?: unknown; message?: unknown }
 }
 
 /** Parse a mutation response body into the created URL or a definite failure. */
-function parseMutationPayload(
+export function parseMutationPayload(
   payload: unknown,
   response: GitHubFetchResponse,
   httpCode: (status: number) => GitHubSubmissionFailureCode = mutationHttpCode,

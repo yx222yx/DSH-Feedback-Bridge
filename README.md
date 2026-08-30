@@ -84,6 +84,19 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   Host-to-GitHub Authorization header — the token is never returned to the
   Client, the model, or logs. Missing or expired GitHub CLI authorization
   surfaces `gh auth login` guidance plus the draft-export fallback.
+- **GUI OAuth authorization with PKCE (Issue #10)** is the primary novice
+  path: the final confirmation offers **Sign in with GitHub**, the Host runs
+  the authorization-code + PKCE dance (verifier/state owned entirely on the
+  Host), stores the grant through the DSH credentials service
+  (`credentialKey('dsh-feedback-bridge', 'github-oauth')`), shows the
+  authorized public login again at final confirmation, and submits through the
+  same Issue #8 boundary. OAuth denial, expired state, exchange failure,
+  identity failure, and insufficient authorization each settle as distinct
+  localized outcomes with the draft-export fallback; a disconnect action
+  revokes the grant. The UI discloses that the DSH local credentials provider
+  is not an operating-system security boundary. Configure via
+  `github.auth.provider: oauth` plus `github.oauth.clientId` (and the
+  optional endpoint/redirect overrides) in the profile patch.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
 

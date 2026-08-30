@@ -27,6 +27,7 @@ import { SimilarityPanel } from './components/SimilarityPanel.js';
 import { StatusSection } from './components/StatusSection.js';
 import { createAssistTransport, effectiveLanguage } from './assist.js';
 import { createSimilarityTransport, similaritySignature } from './similarity.js';
+import { createOAuthTransport } from './oauth.js';
 import { createSubmissionTransport } from './submission.js';
 import { similarityUrl, submissionUrl } from './env.js';
 import { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
@@ -46,6 +47,7 @@ export {
 export { createDraftPersistence } from './persistence.js';
 export { createAssistTransport, effectiveLanguage, revalidateRepairText } from './assist.js';
 export { createSimilarityTransport, similaritySignature } from './similarity.js';
+export { createOAuthTransport } from './oauth.js';
 export { createSubmissionTransport } from './submission.js';
 export { SubmitPanel } from './components/SubmitPanel.js';
 export { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
@@ -121,6 +123,12 @@ export function apply(ctx: ClientContext): void {
   const assistTransport = createAssistTransport({ assistUrl: assistUrl() });
   const similarityTransport = createSimilarityTransport({ similarityUrl: similarityUrl() });
   const submissionTransport = createSubmissionTransport({ submissionUrl: submissionUrl() });
+  const oauthTransport = createOAuthTransport({
+    statusUrl: '/dsh-feedback-bridge/oauth/status',
+    startUrl: '/dsh-feedback-bridge/oauth/start',
+    cancelUrl: '/dsh-feedback-bridge/oauth/cancel',
+    disconnectUrl: '/dsh-feedback-bridge/oauth/disconnect',
+  });
   // The current-conversation read rides the official `ctx.sessions` face;
   // the `sessions` entry in the inject list above makes it always present.
   const conversation: ConversationSource = createConversationSource(ctx.sessions);
@@ -131,7 +139,7 @@ export function apply(ctx: ClientContext): void {
         id: 'dsh-feedback-bridge',
         locale: NS,
       }, (props) => (
-        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} similarityTransport={similarityTransport} submissionTransport={submissionTransport} conversation={conversation} />
+        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} similarityTransport={similarityTransport} submissionTransport={submissionTransport} oauthTransport={oauthTransport} conversation={conversation} />
       ))),
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',

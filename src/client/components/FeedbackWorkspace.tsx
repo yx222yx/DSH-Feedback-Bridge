@@ -33,6 +33,7 @@ import { NOTICE_STATUS } from '../types.js';
 import { ROLE_LABEL_KEYS, SourcePanel } from './SourcePanel.js';
 import { SimilarityPanel } from './SimilarityPanel.js';
 import { SubmitPanel, type SubmissionPanelState } from './SubmitPanel.js';
+import type { OAuthTransport } from '../oauth.js';
 import type { SubmissionTransport } from '../submission.js';
 import type { SourceCopy } from '../sources.js';
 
@@ -57,6 +58,8 @@ export interface FeedbackWorkspaceProps {
   similarityTransport: SimilarityTransport;
   /** Optional authorized-submission transport; the submit control appears only when wired. */
   submissionTransport?: SubmissionTransport;
+  /** Optional oauth transport; present when the host runs the oauth provider. */
+  oauthTransport?: OAuthTransport;
   /** Current-conversation source from `ctx.sessions`; null without a session service. */
   conversation: ConversationSource | null;
   onClose: () => void;
@@ -93,7 +96,7 @@ function useConversationRead(source: ConversationSource | null | undefined): Con
  * that would overwrite a newer edit asks first. No action here performs a
  * GitHub write or any external network request.
  */
-export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, submissionTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
+export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, submissionTransport, oauthTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
   const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
   const [notice, setNotice] = React.useState<WorkspaceNotice | null>(null);
@@ -292,7 +295,10 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
     setRetryNonce((nonce) => nonce + 1);
   };
 
-  /** Open the final confirmation panel and resolve the read-only submission snapshot. */
+  /** Poll interval for the oauth attempt status. */
+const OAUTH_POLL_MS = 1000;
+
+/** Open the final confirmation panel and resolve the read-only submission snapshot. */
   const openSubmission = () => {
     if (submissionTransport === undefined) return;
     userInteractedRef.current = true;
@@ -315,6 +321,14 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
             categories: result.categories,
             destination: result.destination,
           });
+        } else if (result.status === 'failed' && result.code === 'authorization-required' && oauthTransport !== undefined) {
+          // The oauth provider needs a grant: offer the sign-in step.
+          oauthTransport.status()
+            .then((oauth) => {
+              if (oauth.supported) setSubmission({ phase: 'authorize' });
+              else setSubmission({ phase: 'failed', code: 'authorization-required' });
+            })
+            .catch(() => setSubmission({ phase: 'failed', code: 'authorization-required' }));
         } else if (result.code !== 'unknown') {
           // Prepare is read-only; the host never reports unknown for it.
           setSubmission({ phase: 'failed', code: result.code });
@@ -323,6 +337,58 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
         }
       })
       .catch(() => setSubmission({ phase: 'failed', code: 'network' }));
+  };
+
+  /** Start the oauth PKCE flow and poll the host attempt until it settles. */
+  const startOAuth = () => {
+    if (oauthTransport === undefined) return;
+    userInteractedRef.current = true;
+    oauthTransport.start()
+      .then((started) => {
+        setSubmission({ phase: 'authorizing', url: started.url });
+        window.open(started.url, '_blank', 'noopener,noreferrer');
+        const timer = window.setInterval(() => {
+          oauthTransport.status()
+            .then((oauth) => {
+              if (oauth.supported && oauth.status === 'authorized') {
+                window.clearInterval(timer);
+                // Re-resolve the read-only snapshot with the stored grant.
+                openSubmission();
+              } else if (oauth.supported && oauth.status === 'failed') {
+                window.clearInterval(timer);
+                setSubmission({ phase: 'oauth-failed', code: oauth.code });
+              } else if (oauth.supported && oauth.status === 'cancelled') {
+                window.clearInterval(timer);
+                setSubmission({ phase: 'authorize' });
+              }
+            })
+            .catch(() => {
+              window.clearInterval(timer);
+              setSubmission({ phase: 'oauth-failed', code: 'network' });
+            });
+        }, OAUTH_POLL_MS);
+      })
+      .catch(() => setSubmission({ phase: 'oauth-failed', code: 'network' }));
+  };
+
+  /** Withdraw the running oauth attempt. */
+  const cancelOAuth = () => {
+    if (oauthTransport === undefined) return;
+    oauthTransport.cancel().catch(() => {});
+    setSubmission({ phase: 'authorize' });
+  };
+
+  /** Re-present the authorize step after an oauth failure. */
+  const retryOAuth = () => {
+    setSubmission({ phase: 'authorize' });
+  };
+
+  /** Revoke the stored grant and return to the workspace with draft export. */
+  const disconnectOAuth = () => {
+    if (oauthTransport === undefined) return;
+    oauthTransport.disconnect()
+      .then(() => setSubmissionOpen(false))
+      .catch(() => {});
   };
 
   /** Apply the explicitly selected gh account and resolve the read-only snapshot for it. */
@@ -858,6 +924,10 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
               onCategoryChange={setSubmissionCategory}
               onConfirm={confirmSubmission}
               onAccountSelected={selectSubmissionAccount}
+              onStartOAuth={startOAuth}
+              onCancelOAuth={cancelOAuth}
+              onRetryOAuth={retryOAuth}
+              onDisconnect={disconnectOAuth}
               onBack={closeSubmission}
               onExport={handleExport}
             />

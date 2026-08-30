@@ -190,3 +190,31 @@ test('SubmitPanel shows the selected public account again on the final confirmat
   assert.match(html, /data-testid="dsh-feedback-submission-account"/);
   assert.match(html, /alice/);
 });
+test('SubmitPanel offers a sign-in step with the credentials-provider disclosure when authorization is required', () => {
+  const { html } = renderPanel({ phase: 'authorize' }, { onStartOAuth() {} });
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-sign-in"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-disclosure"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-export"/);
+});
+
+test('SubmitPanel shows the browser-handoff status with cancel while authorizing', () => {
+  const { html } = renderPanel({ phase: 'authorizing', url: 'https://github.com/login/oauth/authorize?state=x' });
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-authorizing"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-open"/);
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-cancel"/);
+});
+
+test('SubmitPanel explains each oauth failure class with retry and the export fallback', () => {
+  const codes = ['denied', 'state-expired', 'exchange-failed', 'user-failed', 'network'];
+  for (const code of codes) {
+    const { html } = renderPanel({ phase: 'oauth-failed', code }, { onRetryOAuth() {} });
+    assert.match(html, /data-testid="dsh-feedback-submission-oauth-failed"/, code);
+    assert.match(html, /data-testid="dsh-feedback-submission-oauth-retry"/, code);
+    assert.match(html, /data-testid="dsh-feedback-submission-export"/, code);
+  }
+});
+
+test('SubmitPanel shows a disconnect action on the final confirmation when oauth is wired', () => {
+  const { html } = renderPanel(readyState(), { onDisconnect() {} });
+  assert.match(html, /data-testid="dsh-feedback-submission-oauth-disconnect"/);
+});

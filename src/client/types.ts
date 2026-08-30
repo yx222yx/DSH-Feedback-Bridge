@@ -182,7 +182,20 @@ export type FeedbackBridgeKey =
   | 'submission.unknown'
   | 'submission.unknown.guidance'
   | 'submission.guidance.reauth'
-  | 'submission.guidance.scopes';
+  | 'submission.guidance.scopes'
+  | 'oauth.signIn'
+  | 'oauth.starting'
+  | 'oauth.waiting'
+  | 'oauth.open'
+  | 'oauth.cancel'
+  | 'oauth.disconnect'
+  | 'oauth.retry'
+  | 'oauth.disclosure'
+  | 'oauth.failed.denied'
+  | 'oauth.failed.state-expired'
+  | 'oauth.failed.exchange-failed'
+  | 'oauth.failed.user-failed'
+  | 'oauth.failed.network';
 
 /** Namespace-bound translate function delivered by the locale service. */
 export type T = TranslateNS<'dsh-feedback-bridge'>;

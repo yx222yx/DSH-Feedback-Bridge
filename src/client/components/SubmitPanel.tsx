@@ -1,5 +1,6 @@
 import React from 'react';
 import type { DiscussionCategory, GitHubSubmissionFailureCode, OfficialDestination } from '../../host/github.js';
+import type { OAuthFailureCode } from '../oauth.js';
 import type { DraftLanguage, FeedbackBridgeKey, T } from '../types.js';
 
 /** Locale-owned explanation key per definite failure class (unknown has its own phase). */
@@ -23,6 +24,9 @@ const AUTH_GUIDANCE_KEYS: Partial<Record<Exclude<GitHubSubmissionFailureCode, 'u
 /** Final-confirmation panel state machine owned by the workspace. */
 export type SubmissionPanelState =
   | { phase: 'preparing' }
+  | { phase: 'authorize' }
+  | { phase: 'authorizing'; url?: string }
+  | { phase: 'oauth-failed'; code: OAuthFailureCode }
   | { phase: 'select-account'; accounts: { login: string }[] }
   | {
     phase: 'ready';
@@ -53,6 +57,14 @@ export interface SubmitPanelProps {
   onConfirm(): void;
   /** The explicit account choice that must precede any gh-backed confirmation. */
   onAccountSelected(login: string): void;
+  /** Start the oauth PKCE flow from the authorize step. */
+  onStartOAuth?(): void;
+  /** Withdraw the running oauth attempt. */
+  onCancelOAuth?(): void;
+  /** Re-present the authorize step after an oauth failure. */
+  onRetryOAuth?(): void;
+  /** Revoke the stored grant from the ready state; returns to draft export. */
+  onDisconnect?(): void;
   /** Leave the panel without any mutation. */
   onBack(): void;
   /** Draft-export fallback, available in every state. */
@@ -67,7 +79,7 @@ export interface SubmitPanelProps {
  * results each render distinct localized outcomes that preserve draft export;
  * an unknown result never offers a retry.
  */
-export function SubmitPanel({ t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onAccountSelected, onBack, onExport }: SubmitPanelProps): React.ReactElement {
+export function SubmitPanel({ t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onAccountSelected, onStartOAuth, onCancelOAuth, onRetryOAuth, onDisconnect, onBack, onExport }: SubmitPanelProps): React.ReactElement {
   return (
     <section className="dsh-feedback-submission" data-testid="dsh-feedback-submission">
       <h3 className="dsh-feedback-section-title">{t('submission.title')}</h3>
@@ -85,7 +97,10 @@ export function SubmitPanel({ t, state, title, body, language, categoryId, onCat
           />
         )
         : null}
-      {state.phase === 'ready' ? renderReady(t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onBack, onExport) : null}
+      {state.phase === 'authorize' ? renderAuthorize(t, onStartOAuth, onBack, onExport) : null}
+      {state.phase === 'authorizing' ? renderAuthorizing(t, state.url, onCancelOAuth, onBack, onExport) : null}
+      {state.phase === 'oauth-failed' ? renderOAuthFailed(t, state.code, onRetryOAuth, onBack, onExport) : null}
+      {state.phase === 'ready' ? renderReady(t, state, title, body, language, categoryId, onCategoryChange, onConfirm, onDisconnect, onBack, onExport) : null}
       {state.phase === 'created' ? renderCreated(t, state.url, onBack, onExport) : null}
       {state.phase === 'failed' ? renderFailed(t, state.code, onBack, onExport) : null}
       {state.phase === 'unknown' ? renderUnknown(t, onBack, onExport) : null}
@@ -103,6 +118,7 @@ function renderReady(
   categoryId: string,
   onCategoryChange: (id: string) => void,
   onConfirm: () => void,
+  onDisconnect: (() => void) | undefined,
   onBack: () => void,
   onExport: () => void,
 ): React.ReactElement {
@@ -161,6 +177,11 @@ function renderReady(
         <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-export" onClick={onExport}>
           {t('submission.export')}
         </button>
+        {onDisconnect !== undefined ? (
+          <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-oauth-disconnect" onClick={onDisconnect}>
+            {t('oauth.disconnect')}
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -269,6 +290,102 @@ function AccountSelectionForm({
           onClick={() => onAccountSelected(selected)}
         >
           {t('submission.account.continue')}
+        </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-back" onClick={onBack}>
+          {t('submission.back')}
+        </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-export" onClick={onExport}>
+          {t('submission.export')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Locale-owned explanation key per oauth failure class. */
+const OAUTH_FAILURE_KEYS: Record<OAuthFailureCode, FeedbackBridgeKey> = {
+  denied: 'oauth.failed.denied',
+  'state-expired': 'oauth.failed.state-expired',
+  'exchange-failed': 'oauth.failed.exchange-failed',
+  'user-failed': 'oauth.failed.user-failed',
+  network: 'oauth.failed.network',
+};
+
+/** Render the authorize step: start oauth, the credentials-provider disclosure, and draft export. */
+function renderAuthorize(
+  t: T,
+  onStartOAuth: (() => void) | undefined,
+  onBack: () => void,
+  onExport: () => void,
+): React.ReactElement {
+  return (
+    <div className="dsh-feedback-submission-authorize" data-testid="dsh-feedback-submission-authorize">
+      <button
+        type="button"
+        className="dsh-feedback-action dsh-feedback-action-primary"
+        data-testid="dsh-feedback-submission-oauth-sign-in"
+        onClick={onStartOAuth}
+      >
+        {t('oauth.signIn')}
+      </button>
+      <p className="dsh-feedback-submission-guidance" data-testid="dsh-feedback-submission-oauth-disclosure">{t('oauth.disclosure')}</p>
+      <div className="dsh-feedback-submission-actions">
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-back" onClick={onBack}>
+          {t('submission.back')}
+        </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-export" onClick={onExport}>
+          {t('submission.export')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Render the browser-handoff state while the oauth attempt is running. */
+function renderAuthorizing(
+  t: T,
+  url: string | undefined,
+  onCancelOAuth: (() => void) | undefined,
+  onBack: () => void,
+  onExport: () => void,
+): React.ReactElement {
+  return (
+    <div className="dsh-feedback-submission-authorizing" data-testid="dsh-feedback-submission-oauth-authorizing">
+      <p className="dsh-feedback-hint">{t('oauth.waiting')}</p>
+      {url !== undefined ? (
+        <a className="dsh-feedback-action dsh-feedback-action-primary" href={url} target="_blank" rel="noreferrer" data-testid="dsh-feedback-submission-oauth-open">
+          {t('oauth.open')}
+        </a>
+      ) : null}
+      <div className="dsh-feedback-submission-actions">
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-oauth-cancel" onClick={onCancelOAuth}>
+          {t('oauth.cancel')}
+        </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-back" onClick={onBack}>
+          {t('submission.back')}
+        </button>
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-export" onClick={onExport}>
+          {t('submission.export')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Render an oauth failure with its localized copy, retry, and the export fallback. */
+function renderOAuthFailed(
+  t: T,
+  code: OAuthFailureCode,
+  onRetryOAuth: (() => void) | undefined,
+  onBack: () => void,
+  onExport: () => void,
+): React.ReactElement {
+  return (
+    <div className="dsh-feedback-submission-oauth-failed" data-testid="dsh-feedback-submission-oauth-failed">
+      <p className="dsh-feedback-submission-error">{t(OAUTH_FAILURE_KEYS[code])}</p>
+      <div className="dsh-feedback-submission-actions">
+        <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-oauth-retry" onClick={onRetryOAuth}>
+          {t('oauth.retry')}
         </button>
         <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-submission-back" onClick={onBack}>
           {t('submission.back')}
