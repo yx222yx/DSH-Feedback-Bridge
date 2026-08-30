@@ -1846,6 +1846,109 @@ test('oauth-backed submission: denial settles as a distinct failure with zero mu
     rmSync(tarballPath, { force: true });
   }
 });
+
+
+/** Pairwise overlap of two viewport rects; null rects never overlap. */
+function rectsOverlap(a, b) {
+  if (a === null || b === null) return false;
+  return !(a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y);
+}
+
+test('final confirmation expands below the edit form without overlapping any control (browser geometry regression)', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-geometry-'));
+
+  const github = await startFakeGitHub();
+  const oauth = await startFakeOAuth();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), githubOauthPatch(oauth.base, github.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+      await fillPublicDraft(page);
+      await page.click('[data-testid="dsh-feedback-submission-open"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-submission-authorize"]', { timeout: 20_000 });
+      await page.waitForTimeout(500);
+
+      const measure = () => page.evaluate(() => {
+        const rect = (selector) => {
+          const el = document.querySelector(selector);
+          if (el === null) return null;
+          const box = el.getBoundingClientRect();
+          return { x: box.x, y: box.y, width: box.width, height: box.height };
+        };
+        return {
+          title: rect('[data-testid="dsh-feedback-title"]'),
+          scenario: rect('[data-testid="dsh-feedback-scenario"]'),
+          gap: rect('[data-testid="dsh-feedback-gap"]'),
+          desired: rect('[data-testid="dsh-feedback-desired"]'),
+          submission: rect('[data-testid="dsh-feedback-submission"]'),
+          signIn: rect('[data-testid="dsh-feedback-submission-oauth-sign-in"]'),
+          disclosure: rect('[data-testid="dsh-feedback-submission-oauth-disclosure"]'),
+          back: rect('[data-testid="dsh-feedback-submission-back"]'),
+          exportBtn: rect('[data-testid="dsh-feedback-submission-export"]'),
+        };
+      });
+
+      const assertNoOverlap = (label, boxes) => {
+        // The final confirmation sits below the whole edit form, not over it.
+        assert.ok(
+          boxes.submission.y >= boxes.title.y + boxes.title.height,
+          label + ': the final confirmation must start below the title field',
+        );
+        assert.ok(!rectsOverlap(boxes.submission, boxes.title), label + ': submission must not overlap the title field');
+        assert.ok(!rectsOverlap(boxes.submission, boxes.scenario), label + ': submission must not overlap the scenario field');
+        assert.ok(!rectsOverlap(boxes.signIn, boxes.scenario), label + ': the sign-in button must not overlap the scenario field');
+        assert.ok(!rectsOverlap(boxes.disclosure, boxes.gap), label + ': the disclosure must not overlap the gap field');
+        assert.ok(!rectsOverlap(boxes.back, boxes.scenario), label + ': the back button must not sit inside the scenario textarea');
+        assert.ok(!rectsOverlap(boxes.exportBtn, boxes.gap), label + ': the export button must not sit inside the gap textarea');
+        // The form fields keep their vertical order.
+        assert.ok(
+          boxes.title.y < boxes.scenario.y && boxes.scenario.y < boxes.gap.y && boxes.gap.y < boxes.desired.y,
+          label + ': the edit fields must keep their vertical order',
+        );
+      };
+
+      const wide = await measure();
+      assertNoOverlap('wide', wide);
+
+      // Narrower window: single-column layout must still never overlap.
+      await page.setViewportSize({ width: 700, height: 800 });
+      await page.waitForTimeout(400);
+      const narrow = await measure();
+      assertNoOverlap('narrow', narrow);
+
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    github.server.close();
+    oauth.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
 /** Test-only fake `gh` shim served from a temp PATH directory: two stored github.com accounts with canned tokens. */
 const GH_SHIM = [
   '#!/usr/bin/env bash',
