@@ -402,6 +402,9 @@ function setupWorkspace({ manualTimers = false, persisted = null, failSave = fal
     sessions,
     persistence,
     assistTransport: assistTransport ?? { run: () => Promise.reject(new Error('no transport')) },
+    similarityTransport: {
+      run: () => Promise.resolve({ status: 'ok', results: [], sourceStates: [] }),
+    },
     conversation,
     onClose: () => closed.push(true),
   });

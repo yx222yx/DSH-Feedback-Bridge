@@ -1222,3 +1222,241 @@ test('fake-backed model-assist: malformed output enters the repair panel and rev
     rmSync(fakeTarballPath, { force: true });
   }
 });
+
+
+// Issue #7: early read-only similarity results from the approved sources
+// ---------------------------------------------------------------------------
+
+/** Atom fixture with one entry matching the acceptance intent terms. */
+const SIMILARITY_ATOM = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>tag:github.com,2008:3383</id>
+    <link type="text/html" rel="alternate" href="https://github.com/deepseek-ai/deepseek-harness/discussions/3383"/>
+    <title>Export a plugin draft from a conversation</title>
+    <updated>2026-08-30T07:16:44+00:00</updated>
+    <content type="html">&lt;p&gt;How do I export a plugin draft?&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:3384</id>
+    <link type="text/html" rel="alternate" href="https://github.com/deepseek-ai/deepseek-harness/discussions/3384"/>
+    <title>Unrelated token caps topic</title>
+    <updated>2026-08-29T12:00:00+00:00</updated>
+    <content type="html">&lt;p&gt;Nothing about exports here.&lt;/p&gt;</content>
+  </entry>
+</feed>`;
+
+/** npm-registry-shaped payload with one official-scope package. */
+const SIMILARITY_NPM = {
+  objects: [
+    {
+      package: {
+        name: '@deepseek-ai/dsh-skill',
+        description: 'Agent skill provider registry for the DeepSeek Harness',
+        links: { repository: 'https://github.com/deepseek-ai/deepseek-harness' },
+      },
+    },
+  ],
+};
+
+const SIMILARITY_DOC = '# Architecture\n\nThe DeepSeek Harness plugin architecture supports exporting a plugin draft.\n';
+
+/**
+ * Start a local read-only fake source server that serves deterministic
+ * fixtures and records every request. The plugin's similarity config points
+ * here during acceptance, so the check never touches a real public host.
+ */
+async function startFakeSources() {
+  const { createServer } = await import('node:http');
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    if (req.url === '/atom') {
+      res.writeHead(200, { 'content-type': 'application/atom+xml' });
+      res.end(SIMILARITY_ATOM);
+    } else if (req.url === '/rate-limited-atom') {
+      res.writeHead(429, { 'content-type': 'text/plain' });
+      res.end('rate limited');
+    } else if (req.url !== null && req.url.startsWith('/npm?')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(SIMILARITY_NPM));
+    } else if (req.url === '/docs/architecture.md') {
+      res.writeHead(200, { 'content-type': 'text/markdown' });
+      res.end(SIMILARITY_DOC);
+    } else {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = 'http://127.0.0.1:' + (address === null || typeof address === 'string' ? '0' : address.port);
+  return { server, requests, base };
+}
+
+/** The profile patch layer pointing the plugin's similarity sources at the fake server. */
+function similarityPatch(base, { rateLimitedAtom = false } = {}) {
+  return [
+    '- id: dsh-feedback-bridge',
+    '  config:',
+    '    similarity:',
+    '      timeoutMs: 3000',
+    '      sources:',
+    '        discussions:',
+    '          url: ' + base + (rateLimitedAtom ? '/rate-limited-atom' : '/atom'),
+    '        plugins:',
+    '          url: ' + base + '/npm',
+    '        documentation:',
+    '          urls:',
+    '            - ' + base + '/docs/architecture.md',
+    '',
+  ].join('\n');
+}
+
+test('early similarity results surface from the approved sources read-only, dedupe, and never block export', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-similarity-'));
+
+  const sources = await startFakeSources();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), similarityPatch(sources.base));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const requests = [];
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+      page.on('request', (request) => requests.push(request.url()));
+      page.on('websocket', (socket) => requests.push(socket.url()));
+
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+
+      // The minimum feedback intent: scenario, gap, desired all non-empty.
+      await page.fill('[data-testid="dsh-feedback-scenario"]', 'I run a plugin on WSL2');
+      await page.fill('[data-testid="dsh-feedback-gap"]', 'I cannot export a plugin draft');
+      await page.fill('[data-testid="dsh-feedback-desired"]', 'A documented export plugin flow');
+
+      // The check runs after the debounce and surfaces all three sources.
+      await page.waitForSelector('[data-testid="dsh-feedback-similarity-result"]', { timeout: 20_000 });
+      const links = await page.locator('[data-testid="dsh-feedback-similarity-link"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('href')));
+      assert.ok(links.some((href) => href.includes('/discussions/3383')), 'discussion result link missing: ' + links.join(', '));
+      assert.ok(links.some((href) => href === 'https://github.com/deepseek-ai/deepseek-harness'), 'plugin result link missing');
+      assert.ok(links.some((href) => href.endsWith('/docs/architecture.md')), 'documentation result link missing');
+      const reason = await page.locator('[data-testid="dsh-feedback-similarity-reason"]').first().innerText();
+      assert.match(reason, /export|draft|plugin/);
+
+      // Advisory only: no duplicate verdict and no blocking.
+      const panelText = await page.locator('[data-testid="dsh-feedback-similarity"]').innerText();
+      assert.doesNotMatch(panelText, /duplicate|重复/i);
+
+      // No repeated search for an unchanged intent: the counts stay put.
+      const snapshot = () => sources.requests.filter((request) => request.url.startsWith('/npm?')).length;
+      const before = snapshot();
+      await page.waitForTimeout(1500);
+      assert.equal(snapshot(), before, 'an unchanged intent re-triggered the similarity check');
+
+      // The user continues creating a new Discussion: export still works.
+      await page.fill('[data-testid="dsh-feedback-title"]', 'Export a plugin draft');
+      const downloadPromise = page.waitForEvent('download');
+      await page.click('[data-testid="dsh-feedback-export"]');
+      const download = await downloadPromise;
+      const exported = readFileSync(await download.path(), 'utf8');
+      assert.match(exported, /# Export a plugin draft/);
+
+      await browser.close();
+      // Every source request was a read-only GET, and the browser made no
+      // external or GitHub requests across the whole flow.
+      assert.ok(sources.requests.length >= 3);
+      assert.ok(sources.requests.every((request) => request.method === 'GET'), 'a non-GET source request was observed');
+      const external = requests.filter((url) => {
+        const host = new URL(url).hostname;
+        return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1' && host !== '[::1]';
+      });
+      assert.deepEqual(external, [], 'unexpected external requests: ' + external.join(', '));
+      assert.ok(!requests.some((url) => /github\.com/i.test(url)), 'a GitHub request was observed');
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    sources.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});
+
+test('a rate-limited similarity source is explained without blocking the feedback session', { skip: !hasDsh || !hasPnpm || !hasPlaywrightCore }, async () => {
+  const { chromium } = await import('playwright-core');
+  const { mkdtempSync, rmSync, readFileSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tarball = packFilename(repoRoot);
+  const tarballPath = join(repoRoot, tarball);
+  const dshHome = mkdtempSync(join(tmpdir(), 'dsh-feedback-bridge-similarity-rate-'));
+
+  const sources = await startFakeSources();
+  try {
+    run('dsh', ['plugin', '--profile', 'web', 'add', tarballPath], {
+      cwd: repoRoot,
+      env: { ...process.env, DSH_HOME: dshHome },
+    });
+    writeFileSync(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), similarityPatch(sources.base, { rateLimitedAtom: true }));
+    const cleanEnv = { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' };
+    delete cleanEnv.DSH_VERSION;
+    const { child, port } = await bootWeb(cleanEnv);
+    const baseUrl = 'http://127.0.0.1:' + port;
+
+    try {
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext({ acceptDownloads: true });
+      const page = await context.newPage();
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+      await dismissFirstRunModals(page);
+      await page.waitForSelector('[data-testid="dsh-feedback-trigger"]', { timeout: 60_000 });
+      await page.click('[data-testid="dsh-feedback-trigger"]');
+      await page.waitForSelector('[data-testid="dsh-feedback-workspace"]', { timeout: 30_000 });
+
+      await page.fill('[data-testid="dsh-feedback-scenario"]', 'I run a plugin on WSL2');
+      await page.fill('[data-testid="dsh-feedback-gap"]', 'I cannot export a plugin draft');
+      await page.fill('[data-testid="dsh-feedback-desired"]', 'A documented export plugin flow');
+
+      // The failed discussion source is explained while the other sources still render.
+      await page.waitForSelector('[data-testid="dsh-feedback-similarity-partial"]', { timeout: 20_000 });
+      const partial = await page.locator('[data-testid="dsh-feedback-similarity-partial"]').innerText();
+      assert.match(partial, /rate limited|限流/);
+      assert.ok(await page.locator('[data-testid="dsh-feedback-similarity-retry"]').count(), 'retry control missing');
+      assert.ok((await page.locator('[data-testid="dsh-feedback-similarity-result"]').count()) >= 2, 'plugin/docs results missing');
+
+      // The session stays usable: export completes despite the failed source.
+      await page.fill('[data-testid="dsh-feedback-title"]', 'Export a plugin draft');
+      const downloadPromise = page.waitForEvent('download');
+      await page.click('[data-testid="dsh-feedback-export"]');
+      const download = await downloadPromise;
+      const exported = readFileSync(await download.path(), 'utf8');
+      assert.match(exported, /# Export a plugin draft/);
+      await browser.close();
+    } finally {
+      await stopWeb(child);
+    }
+  } finally {
+    sources.server.close();
+    rmSync(dshHome, { recursive: true, force: true });
+    rmSync(tarballPath, { force: true });
+  }
+});

@@ -1,4 +1,4 @@
-import { ASSIST_PATH, DRAFT_PATH, STATUS_PATH } from './constants.js';
+import { ASSIST_PATH, DRAFT_PATH, SIMILARITY_PATH, STATUS_PATH } from './constants.js';
 
 /**
  * Resolve the same-origin Host status route under the document base URL.
@@ -28,4 +28,14 @@ export function draftUrl(): string {
 export function assistUrl(): string {
   if (typeof document === 'undefined') return ASSIST_PATH;
   return new URL('dsh-feedback-bridge/assist', document.baseURI).pathname;
+}
+
+/**
+ * Resolve the same-origin Host similarity route under the document base URL.
+ *
+ * @returns the similarity route pathname.
+ */
+export function similarityUrl(): string {
+  if (typeof document === 'undefined') return SIMILARITY_PATH;
+  return new URL('dsh-feedback-bridge/similarity', document.baseURI).pathname;
 }

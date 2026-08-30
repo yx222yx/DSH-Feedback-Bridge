@@ -3,7 +3,7 @@ import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-s
 import { FeedbackIcon } from './FeedbackIcon.js';
 import { FeedbackWorkspace } from './FeedbackWorkspace.js';
 import type { ConversationSource } from '../conversation.js';
-import type { AssistTransport, DraftPersistence, FeedbackSessionController, T } from '../types.js';
+import type { AssistTransport, DraftPersistence, FeedbackSessionController, SimilarityTransport, T } from '../types.js';
 
 /** Full props of the sidebar footer action: owner state plus the plugin's own share. */
 export interface FeedbackTriggerProps extends SidebarFooterActionOwnerProps {
@@ -11,6 +11,7 @@ export interface FeedbackTriggerProps extends SidebarFooterActionOwnerProps {
   sessions: FeedbackSessionController;
   persistence: DraftPersistence;
   assistTransport: AssistTransport;
+  similarityTransport: SimilarityTransport;
   conversation: ConversationSource | null;
 }
 
@@ -20,7 +21,7 @@ export interface FeedbackTriggerProps extends SidebarFooterActionOwnerProps {
  * every locale by product mandate, and the collapsed rail keeps the same
  * Chinese accessible name.
  */
-export function FeedbackTrigger({ t, sessions, persistence, assistTransport, conversation, wide }: FeedbackTriggerProps): React.ReactElement {
+export function FeedbackTrigger({ t, sessions, persistence, assistTransport, similarityTransport, conversation, wide }: FeedbackTriggerProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   return (
     <>
@@ -36,7 +37,7 @@ export function FeedbackTrigger({ t, sessions, persistence, assistTransport, con
         {wide ? <span className="dsh-feedback-trigger-label">{t('nav')}</span> : null}
       </button>
       {open ? (
-        <FeedbackWorkspace t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} conversation={conversation} onClose={() => setOpen(false)} />
+        <FeedbackWorkspace t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} similarityTransport={similarityTransport} conversation={conversation} onClose={() => setOpen(false)} />
       ) : null}
     </>
   );

@@ -253,6 +253,13 @@ test('feedback workspace renders the five editable fields, type badge, preview a
   assert.match(html, /aria-label="关闭"/);
 });
 
+test('workspace shows the similarity hint until the minimum feedback intent is present', () => {
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), onClose: () => {} }, 'zh');
+  assert.match(html, /data-testid="dsh-feedback-similarity"/);
+  assert.match(html, /data-testid="dsh-feedback-similarity-idle"/);
+  assert.match(html, /填写场景、问题与期望结果后，将自动查找相似结果。/);
+});
+
 test('workspace renders the assist control disabled until a session and confirmed sources exist', () => {
   // No session and no sources: the generate button is disabled.
   const without = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), conversation: null, onClose: () => {} }, 'en');

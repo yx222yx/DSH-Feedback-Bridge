@@ -3,6 +3,7 @@ import { OFFICIAL_DISCUSSIONS_URL } from '../constants.js';
 import { statusUrl } from '../env.js';
 import { buildDraftMarkdown, feedbackDraftFileName } from '../session.js';
 import { revalidateRepairText } from '../assist.js';
+import { similaritySignature } from '../similarity.js';
 import { scanPrivacy } from '../privacy.js';
 import {
   applyRecommendations,
@@ -23,15 +24,21 @@ import type {
   FeedbackSessionController,
   FeedbackType,
   PrivacyFinding,
+  SimilarityPanelState,
+  SimilarityTransport,
   T,
   WorkspaceNotice,
 } from '../types.js';
 import { NOTICE_STATUS } from '../types.js';
 import { ROLE_LABEL_KEYS, SourcePanel } from './SourcePanel.js';
+import { SimilarityPanel } from './SimilarityPanel.js';
 import type { SourceCopy } from '../sources.js';
 
 /** Debounce window before an edit triggers an autosave, in milliseconds. */
 const AUTOSAVE_DELAY_MS = 600;
+
+/** Debounce window before an intent edit triggers the read-only similarity check. */
+const SIMILARITY_DEBOUNCE_MS = 800;
 
 /** The four feedback types in render order, matching the type selector. */
 const TYPE_OPTIONS: FeedbackType[] = ['plugin-request', 'harness-feature', 'harness-defect', 'custom'];
@@ -45,6 +52,7 @@ export interface FeedbackWorkspaceProps {
   sessions: FeedbackSessionController;
   persistence: import('../types.js').DraftPersistence;
   assistTransport: AssistTransport;
+  similarityTransport: SimilarityTransport;
   /** Current-conversation source from `ctx.sessions`; null without a session service. */
   conversation: ConversationSource | null;
   onClose: () => void;
@@ -81,7 +89,7 @@ function useConversationRead(source: ConversationSource | null | undefined): Con
  * that would overwrite a newer edit asks first. No action here performs a
  * GitHub write or any external network request.
  */
-export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
+export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
   const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
   const [notice, setNotice] = React.useState<WorkspaceNotice | null>(null);
@@ -94,6 +102,17 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
   const [repairText, setRepairText] = React.useState('');
   const [modelError, setModelError] = React.useState<{ code: string; message: string } | null>(null);
   const [confirmOverwrite, setConfirmOverwrite] = React.useState<FeedbackFieldKey | null>(null);
+  const [similarity, setSimilarity] = React.useState<SimilarityPanelState>({ phase: 'idle' });
+  const [retryNonce, setRetryNonce] = React.useState(0);
+  const seqRef = React.useRef(0);
+  const controllerRef = React.useRef<AbortController | null>(null);
+  const searchedRef = React.useRef<string | null>(null);
+  const intentSignature = similaritySignature({
+    scenario: fields.scenario,
+    gap: fields.gap,
+    desired: fields.desired,
+    type: fields.type,
+  });
   const userInteractedRef = React.useRef(false);
   const savedRef = React.useRef<string | null>(null);
   const timerRef = React.useRef<number | null>(null);
@@ -217,6 +236,51 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
       cancelled = true;
     };
   }, []);
+
+  // Run the read-only similarity check once the minimum feedback intent is
+  // present, debounced per edit. An intent change aborts any in-flight check
+  // and a response sequence guard drops stale results, so the panel never
+  // shows results for an intent the user already revised; an unchanged
+  // signature skips a redundant search.
+  React.useEffect(() => {
+    controllerRef.current?.abort();
+    if (intentSignature === null) {
+      setSimilarity({ phase: 'idle' });
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      if (searchedRef.current === intentSignature) return;
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      const seq = seqRef.current + 1;
+      seqRef.current = seq;
+      setSimilarity({ phase: 'checking' });
+      similarityTransport.run({
+        scenario: fieldsRef.current.scenario,
+        gap: fieldsRef.current.gap,
+        desired: fieldsRef.current.desired,
+        type: fieldsRef.current.type,
+        language: fieldsRef.current.language ?? null,
+      }, controller.signal)
+        .then((outcome) => {
+          if (seq !== seqRef.current) return;
+          searchedRef.current = intentSignature;
+          setSimilarity({ phase: 'done', outcome });
+        })
+        .catch((error) => {
+          if (seq !== seqRef.current) return;
+          if (error instanceof Error && error.name === 'AbortError') return;
+          setSimilarity({ phase: 'failed' });
+        });
+    }, SIMILARITY_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [intentSignature, retryNonce, similarityTransport]);
+
+  /** Re-run the similarity check for the same intent after a failure. */
+  const retrySimilarity = () => {
+    searchedRef.current = null;
+    setRetryNonce((nonce) => nonce + 1);
+  };
 
   /** Toggle one source row between preview and full text. */
   const toggleExpand = (id: string) => {
@@ -554,6 +618,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
             onRemove={handleRemove}
             onQuote={handleQuote}
           />
+          <SimilarityPanel t={t} state={similarity} onRetry={retrySimilarity} />
           <section className="dsh-feedback-assist" data-testid="dsh-feedback-assist">
             <h3 className="dsh-feedback-section-title">{t('assist.title')}</h3>
             <div className="dsh-feedback-assist-actions">

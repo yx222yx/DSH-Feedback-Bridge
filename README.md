@@ -56,6 +56,19 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   findings are advisory and read-only: secrets, personal information, private
   paths, confidential content, and excessive context are flagged but never
   rewritten, redacted, or auto-published.
+- **Early read-only similarity check (Issue #7)** runs once the minimum
+  feedback intent exists (scenario, problem, and desired result all filled),
+  debounced and cancellable, against the approved v0.1 public sources only:
+  the official DeepSeek Harness Discussions (recent atom feed), official
+  `@deepseek-ai` npm packages, and a curated allowlist of official
+  documentation. Results are advisory links with a source badge and a concise
+  matched-terms reason; the plugin never declares a duplicate and never blocks
+  the workflow. The check sends only the minimal intent fields — no confirmed
+  sources, conversation content, or logs — through the same-origin
+  `/dsh-feedback-bridge/similarity` route, and the Host issues only read-only
+  GET requests. Per-source rate-limit, timeout, network, and parse failures
+  are explained without blocking, and source endpoints are configurable
+  (cordis.yml) for deployment and tests.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
 

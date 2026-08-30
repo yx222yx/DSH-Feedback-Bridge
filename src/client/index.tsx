@@ -23,8 +23,11 @@ import {
   SOURCE_PREVIEW_CHARS,
 } from './sources.js';
 import { FeedbackTrigger } from './components/FeedbackTrigger.js';
+import { SimilarityPanel } from './components/SimilarityPanel.js';
 import { StatusSection } from './components/StatusSection.js';
 import { createAssistTransport, effectiveLanguage } from './assist.js';
+import { createSimilarityTransport, similaritySignature } from './similarity.js';
+import { similarityUrl } from './env.js';
 import { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
 
 const name = 'dsh-feedback-bridge';
@@ -40,9 +43,11 @@ export {
 } from './session.js';
 export { createDraftPersistence } from './persistence.js';
 export { createAssistTransport, effectiveLanguage, revalidateRepairText } from './assist.js';
+export { createSimilarityTransport, similaritySignature } from './similarity.js';
 export { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
 export { FeedbackTrigger } from './components/FeedbackTrigger.js';
 export { FeedbackWorkspace } from './components/FeedbackWorkspace.js';
+export { SimilarityPanel } from './components/SimilarityPanel.js';
 export {
   applyRecommendations,
   captureSourceText,
@@ -67,6 +72,14 @@ export type {
   PrivacyFinding,
   PrivacyFindingKind,
   PrivacySeverity,
+  SimilarityFailureCode,
+  SimilarityOutcome,
+  SimilarityPanelState,
+  SimilarityRequest,
+  SimilarityResult,
+  SimilaritySourceKind,
+  SimilaritySourceState,
+  SimilarityTransport,
 } from './types.js';
 export type {
   ConfirmedSourceRecord,
@@ -95,6 +108,7 @@ export function apply(ctx: ClientContext): void {
   const sessions = createFeedbackSessionController();
   const persistence = createDraftPersistence({ draftUrl: draftUrl() });
   const assistTransport = createAssistTransport({ assistUrl: assistUrl() });
+  const similarityTransport = createSimilarityTransport({ similarityUrl: similarityUrl() });
   // The current-conversation read rides the official `ctx.sessions` face;
   // the `sessions` entry in the inject list above makes it always present.
   const conversation: ConversationSource = createConversationSource(ctx.sessions);
@@ -105,7 +119,7 @@ export function apply(ctx: ClientContext): void {
         id: 'dsh-feedback-bridge',
         locale: NS,
       }, (props) => (
-        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} conversation={conversation} />
+        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} similarityTransport={similarityTransport} conversation={conversation} />
       ))),
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',

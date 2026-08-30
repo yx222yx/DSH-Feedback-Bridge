@@ -22,6 +22,7 @@ test('npm pack ships exactly the intended runtime files and nothing else', () =>
     'lib/draft-store.js',
     'lib/feedback-types.js',
     'lib/index.js',
+    'lib/similarity.js',
     'lib/type-needs.js',
     'package.json',
   ]);

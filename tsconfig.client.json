@@ -6,5 +6,5 @@
     "types": [],
     "noEmit": true
   },
-  "include": ["src/client", "src/host/assist-schema.ts", "src/host/feedback-types.ts"]
+  "include": ["src/client", "src/host/assist-schema.ts", "src/host/feedback-types.ts", "src/host/similarity.ts"]
 }

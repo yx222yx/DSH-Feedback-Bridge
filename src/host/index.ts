@@ -7,6 +7,12 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import { assistEnvelope, runAssist, type AssistInput } from './assist.js';
 import { buildAssistEventPayload } from './assist-event.js';
 import {
+  normalizeSimilarityConfig,
+  runSimilarity,
+  type SimilarityConfig,
+  type SimilarityInput,
+} from './similarity.js';
+import {
   assertFeedbackType,
   assertLanguage,
   draftFilePath,
@@ -28,9 +34,13 @@ export { name, inject };
 const STATUS_PATH = '/dsh-feedback-bridge/status';
 const DRAFT_PATH = '/dsh-feedback-bridge/draft';
 const ASSIST_PATH = '/dsh-feedback-bridge/assist';
+const SIMILARITY_PATH = '/dsh-feedback-bridge/similarity';
 
 /** Hard cap on the draft request body: a draft is five text fields. */
 const MAX_DRAFT_BODY_BYTES = 1 << 20;
+
+/** Hard cap on one similarity intent field; the config cap further trims what reaches the sources. */
+export const MAX_SIMILARITY_FIELD_CHARS = 64 * 1024;
 
 /** Package manifest fields the plugin reads at load. */
 interface ManifestShape {
@@ -497,6 +507,100 @@ async function handleAssistRequest(ctx: Context, request: IncomingMessage, respo
   }
 }
 
+/** Plugin configuration: currently only the read-only similarity settings. */
+export interface PluginConfig {
+  similarity?: unknown;
+}
+
+/** The three intent fields the similarity route requires, in stable order. */
+const SIMILARITY_FIELD_KEYS = ['scenario', 'gap', 'desired'] as const;
+
+/**
+ * Validate a similarity request body: exactly the three non-empty intent
+ * fields, the feedback type, and an optional language. Anything else fails
+ * loud at the wire boundary so the sources only ever receive minimal intent.
+ *
+ * @param body - parsed request body.
+ * @returns the validated similarity input.
+ * @throws {Error} describing the first invalid aspect.
+ */
+function parseSimilarityRequest(body: unknown): SimilarityInput {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error('body must be an object');
+  }
+  const record = body as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!['scenario', 'gap', 'desired', 'type', 'language'].includes(key)) {
+      throw new Error('unsupported key: ' + key);
+    }
+  }
+  for (const key of SIMILARITY_FIELD_KEYS) {
+    const value = record[key];
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new Error('similarity field ' + key + ' must be a non-empty string');
+    }
+    if (value.length > MAX_SIMILARITY_FIELD_CHARS) {
+      throw new Error('similarity field ' + key + ' exceeds the ' + MAX_SIMILARITY_FIELD_CHARS + ' char cap');
+    }
+  }
+  assertFeedbackType(record.type);
+  const rawLanguage = record.language;
+  if (rawLanguage !== undefined && rawLanguage !== null && rawLanguage !== 'zh' && rawLanguage !== 'en') {
+    throw new Error('draft language must be zh or en');
+  }
+  const language: DraftLanguage | null = rawLanguage === 'zh' || rawLanguage === 'en' ? rawLanguage : null;
+  return {
+    scenario: record.scenario as string,
+    gap: record.gap as string,
+    desired: record.desired as string,
+    type: record.type as FeedbackType,
+    language,
+  };
+}
+
+/**
+ * Handle one request on the similarity route. POST runs the read-only
+ * similarity check against the approved public sources and returns the
+ * per-source outcome; any other method is refused. The check never writes
+ * anywhere and never touches the draft or the session.
+ *
+ * @param config - the resolved similarity config.
+ * @param request - the incoming request.
+ * @param response - the server response.
+ * @returns void.
+ */
+async function handleSimilarityRequest(config: SimilarityConfig, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method !== 'POST') {
+    writeJson(response, 405, { error: 'method not allowed' }, { allow: 'POST' });
+    return;
+  }
+  let body: unknown;
+  try {
+    body = await readJsonBody(request);
+  } catch (error) {
+    if ((error as HttpError).statusCode === 413) request.resume?.();
+    writeJson(response, (error as HttpError).statusCode ?? 400, { error: (error as Error).message });
+    return;
+  }
+  let input: SimilarityInput;
+  try {
+    input = parseSimilarityRequest(body);
+  } catch (error) {
+    writeJson(response, 400, { error: (error as Error).message });
+    return;
+  }
+  try {
+    const outcome = await runSimilarity(config, input, {
+      fetchImpl: (url, init) => fetch(url, init),
+    });
+    writeJson(response, 200, outcome);
+  } catch {
+    // Any unexpected failure must still respond so the route never hangs;
+    // per-source failures are already reported inside the outcome.
+    writeJson(response, 500, { error: 'similarity failed' });
+  }
+}
+
 /**
  * Handle one request on the draft route. GET reads the persisted draft; POST
  * saves or removes it; any other method is refused. Draft content never
@@ -559,8 +663,9 @@ async function handleDraftRequest(request: IncomingMessage, response: ServerResp
  * @param ctx - Cordis context carrying the `webServer` service.
  * @returns void.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config?: PluginConfig): void {
   assertCompatibleDsh();
+  const similarityConfig = normalizeSimilarityConfig(config?.similarity);
   ctx.effect(() => {
     return ctx.webServer.register({
       kind: 'exact',
@@ -584,4 +689,11 @@ export function apply(ctx: Context): void {
       handler: (request, response) => handleAssistRequest(ctx, request, response),
     } satisfies WebRoute);
   }, 'dsh-feedback-bridge: assist route');
+  ctx.effect(() => {
+    return ctx.webServer.register({
+      kind: 'exact',
+      path: SIMILARITY_PATH,
+      handler: (request, response) => handleSimilarityRequest(similarityConfig, request, response),
+    } satisfies WebRoute);
+  }, 'dsh-feedback-bridge: similarity route');
 }

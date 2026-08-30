@@ -1,5 +1,6 @@
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
 import type { PrivacyKind, PrivacySeverity } from '../host/assist-schema.js';
+import type { SimilarityOutcome, SimilarityResult, SimilaritySourceKind, SimilaritySourceState } from '../host/similarity.js';
 import type { DraftLanguage } from '../host/feedback-types.js';
 import type { ConfirmedSourceRecord } from './sources.js';
 
@@ -139,7 +140,23 @@ export type FeedbackBridgeKey =
   | 'privacy.kind.excess-context'
   | 'privacy.excessContextReason'
   | 'status.noModelContext'
-  | 'status.assistFailed';
+  | 'status.assistFailed'
+  | 'similarity.title'
+  | 'similarity.checking'
+  | 'similarity.idleHint'
+  | 'similarity.results'
+  | 'similarity.noResults'
+  | 'similarity.matches'
+  | 'similarity.retry'
+  | 'similarity.failed'
+  | 'similarity.partial'
+  | 'similarity.source.discussion'
+  | 'similarity.source.plugin'
+  | 'similarity.source.documentation'
+  | 'similarity.failed.rate-limited'
+  | 'similarity.failed.timeout'
+  | 'similarity.failed.network'
+  | 'similarity.failed.parse';
 
 /** Namespace-bound translate function delivered by the locale service. */
 export type T = TranslateNS<'dsh-feedback-bridge'>;
@@ -202,6 +219,7 @@ export interface FetchInitLike {
   headers?: Record<string, string>;
   body?: string;
   keepalive?: boolean;
+  signal?: AbortSignal;
 }
 
 /** fetch-like function; defaults to the global fetch in the browser. */
@@ -230,6 +248,7 @@ export interface DraftPersistence {
 }
 
 export type { PrivacyKind as PrivacyFindingKind, PrivacySeverity } from '../host/assist-schema.js';
+export type { SimilarityFailureCode, SimilarityOutcome, SimilarityResult, SimilaritySourceKind, SimilaritySourceState } from '../host/similarity.js';
 
 /** One read-only privacy finding; findings never rewrite content. */
 export interface PrivacyFinding {
@@ -272,6 +291,27 @@ export type AssistOutcome =
 export interface AssistTransport {
   run(request: AssistRequest): Promise<AssistOutcome>;
 }
+
+/** Minimal feedback intent sent to the similarity route; never carries conversation content. */
+export interface SimilarityRequest {
+  scenario: string;
+  gap: string;
+  desired: string;
+  type: FeedbackType;
+  language: DraftLanguage | null;
+}
+
+/** Serialized similarity transport; the caller may cancel a stale check. */
+export interface SimilarityTransport {
+  run(input: SimilarityRequest, signal?: AbortSignal): Promise<SimilarityOutcome>;
+}
+
+/** Workspace similarity panel state machine. */
+export type SimilarityPanelState =
+  | { phase: 'idle' }
+  | { phase: 'checking' }
+  | { phase: 'done'; outcome: SimilarityOutcome }
+  | { phase: 'failed' };
 
 /** Host status payload served to the Client. */
 export interface HostStatusPayload {
