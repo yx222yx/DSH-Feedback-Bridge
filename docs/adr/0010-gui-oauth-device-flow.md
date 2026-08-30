@@ -65,7 +65,10 @@ a distributed client secret.
   GitHub CLI path (`?method=oauth` / `?method=gh`). An existing oauth grant
   is reused automatically; the mutation routes to the provider owning the
   confirmed identity (an oauth grant whose login matches goes through oauth,
-  otherwise through gh).
+  otherwise through gh). The v0.1 release ships `provider: both` in the
+  bundle patch with the official maintainer-registered OAuth App's public
+  client ID, so authorized submission is usable out of the box; deployments
+  override the provider or client ID in their own profile patch layer.
 
 ## Consequences
 

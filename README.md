@@ -48,19 +48,19 @@ The same two commands work on native Windows. Notes:
 
 ## Authorizing GitHub submission
 
-Without authorization the plugin keeps draft export only; `github.auth.provider: none` is the shipped default. Choose a provider under the plugin's `github.auth` config in the profile patch (`<DSH_HOME>/profiles/web/cordis.patch.yml`):
+The shipped bundle enables **both** authorization paths by default (`github.auth.provider: both` with the official maintainer-registered OAuth App's public client ID). A deployment that wants draft export only sets `github.auth.provider: none` in its own profile patch; any key below can be overridden there (`<DSH_HOME>/profiles/web/cordis.patch.yml`):
 
 ### GitHub Device Flow (recommended novice path)
 
-`provider: oauth` plus `github.oauth.clientId` — the public client ID of a GitHub OAuth App (no client secret, no callback route, no project backend). The final confirmation offers **Sign in with GitHub**: the Host requests a device code, shows GitHub's verification URI and a short user code in the dialog (with a copy action), and polls GitHub's token endpoint at its interval (pending, slow-down, expiry, denial, insufficient `public_repo` scope, and failures are handled distinctly). The grant is stored through the DSH credentials service under `credentialKey('dsh-feedback-bridge', 'github-oauth')`.
+The final confirmation offers **Sign in with GitHub** using the bundled `github.oauth.clientId` (a deployment may override it with its own GitHub OAuth App's public client ID; no client secret, no callback route, no project backend). The Host requests a device code, shows GitHub's verification URI and a short user code in the dialog (with a copy action), and polls GitHub's token endpoint at its interval (pending, slow-down, expiry, denial, insufficient `public_repo` scope, and failures are handled distinctly). The grant is stored through the DSH credentials service under `credentialKey('dsh-feedback-bridge', 'github-oauth')`.
 
 ### GitHub CLI (advanced path)
 
 `provider: gh` — for users who already use the GitHub CLI. The plugin discovers the stored accounts from `gh auth status` (it never reads `git config`, repository metadata, or GitLab identity), forces an explicit account choice whenever several exist, and resolves the chosen account's token with `gh auth token -u <login>`. The token exists only in Host memory for one request; the plugin never runs `gh auth switch`, so your terminal-wide active account stays untouched. Missing or expired GitHub CLI authorization surfaces `gh auth login` guidance plus the draft-export fallback.
 
-### Both
+### Both (shipped default)
 
-`provider: both` — the final confirmation asks you to choose between **Sign in with GitHub** and **Use GitHub CLI account** (the latter shown only when a local `gh` login exists), with an explicit selection on each side.
+`provider: both` is the shipped default: the final confirmation asks you to choose between **Sign in with GitHub** and **Use GitHub CLI account** (the latter shown only when a local `gh` login exists), with an explicit selection on each side. An existing Device Flow grant is reused automatically.
 
 Every provider shows the authorized public login again on the final confirmation before submission.
 

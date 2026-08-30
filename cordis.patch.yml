@@ -1,6 +1,18 @@
 # dsh-feedback-bridge bundle patch: insert this package as one host row.
 # The row name is the package name; the Loader imports its main export and
 # applies it once webServer is available in the composed Web profile.
+#
+# The shipped config enables both GitHub authorization paths by default:
+# Device Flow (Sign in with GitHub) using the official maintainer-registered
+# OAuth App's public client ID, plus the GitHub CLI path when a local gh
+# login exists. A deployment can override any key below in its own profile
+# patch layer (e.g. github.auth.provider: none to keep draft export only).
 - insert:
     - id: dsh-feedback-bridge
       name: 'dsh-feedback-bridge'
+      config:
+        github:
+          auth:
+            provider: both
+          oauth:
+            clientId: Ov23liqCYa6Ll4B61lST
