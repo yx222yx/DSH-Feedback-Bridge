@@ -605,16 +605,18 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
                 <div className="dsh-feedback-assist-draft" data-testid="dsh-feedback-assist-draft">
                   {FIELD_KEYS.map((key) => (
                     <div key={key} className="dsh-feedback-assist-field">
-                      <span className="dsh-feedback-assist-field-label">{t(('field.' + key) as import('../types.js').FeedbackBridgeKey)}</span>
-                      <span className="dsh-feedback-assist-suggested" data-testid={'dsh-feedback-assist-suggested-' + key}>{suggestion.draft[key]}</span>
-                      <button
-                        type="button"
-                        className="dsh-feedback-action"
-                        data-testid={'dsh-feedback-assist-apply-' + key}
-                        onClick={() => applySuggestion(key)}
-                      >
-                        {t('assist.apply')}
-                      </button>
+                      <div className="dsh-feedback-assist-field-head">
+                        <span className="dsh-feedback-assist-field-label">{t(('field.' + key) as import('../types.js').FeedbackBridgeKey)}</span>
+                        <button
+                          type="button"
+                          className="dsh-feedback-action"
+                          data-testid={'dsh-feedback-assist-apply-' + key}
+                          onClick={() => applySuggestion(key)}
+                        >
+                          {t('assist.apply')}
+                        </button>
+                      </div>
+                      <p className="dsh-feedback-assist-suggested" data-testid={'dsh-feedback-assist-suggested-' + key}>{suggestion.draft[key]}</p>
                     </div>
                   ))}
                 </div>
