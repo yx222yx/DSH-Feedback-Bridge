@@ -21,8 +21,10 @@ function createHarness(dshHome) {
   return {
     routes,
     async load() {
-      const provider = context.plugin(function provideWebServer(ctx) {
+      const provider = context.plugin(function provideServices(ctx) {
         ctx.provide('webServer', webServer);
+        ctx.provide('sessions', { get() { return undefined; } });
+        ctx.provide('llm', { stream() { return []; } });
       });
       await provider;
       const previousHome = process.env.DSH_HOME;

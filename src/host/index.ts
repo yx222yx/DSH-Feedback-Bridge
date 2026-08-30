@@ -3,14 +3,31 @@ import { pathToFileURL } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
-import { draftFilePath, load, remove, save, validateSources, type ConfirmedSourceRecord, type DraftFields } from './draft-store.js';
+import { SessionId } from '@deepseek-ai/dsh-session';
+import { runAssist, type AssistInput } from './assist.js';
+import { buildAssistEventPayload } from './assist-event.js';
+import {
+  assertFeedbackType,
+  assertLanguage,
+  draftFilePath,
+  load,
+  remove,
+  save,
+  validateSources,
+  FEEDBACK_TYPES,
+  type ConfirmedSourceRecord,
+  type DraftFields,
+  type DraftLanguage,
+  type FeedbackType,
+} from './draft-store.js';
 
 const name = 'dsh-feedback-bridge';
-const inject = ['webServer'];
+const inject = ['webServer', 'sessions', 'llm'];
 export { name, inject };
 
 const STATUS_PATH = '/dsh-feedback-bridge/status';
 const DRAFT_PATH = '/dsh-feedback-bridge/draft';
+const ASSIST_PATH = '/dsh-feedback-bridge/assist';
 
 /** Hard cap on the draft request body: a draft is five text fields. */
 const MAX_DRAFT_BODY_BYTES = 1 << 20;
@@ -321,10 +338,15 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-/** A validated draft write: remove, or save with five string fields plus confirmed sources. */
+/** A validated draft write: remove, or save with five string fields, confirmed sources, and the feedback type/language. */
 type DraftWrite =
   | { action: 'remove'; draft: null }
-  | { action: 'save'; draft: DraftFields & { sources: ConfirmedSourceRecord[] } };
+  | {
+    action: 'save';
+    draft: DraftFields & { sources: ConfirmedSourceRecord[] };
+    type: FeedbackType;
+    language?: DraftLanguage;
+  };
 
 /**
  * Validate a draft write body: an object with action `save` (plus exactly
@@ -350,16 +372,114 @@ function parseDraftWrite(body: unknown): DraftWrite {
     throw new Error('draft must be an object');
   }
   const expected = ['title', 'scenario', 'gap', 'desired', 'context'];
-  const allowed = [...expected, 'sources'];
+  const allowed = [...expected, 'sources', 'type', 'language'];
   const keys = Object.keys(draft);
   if (
     keys.some((key) => !allowed.includes(key))
     || expected.some((key) => !(key in draft) || typeof (draft as Record<string, unknown>)[key] !== 'string')
   ) {
-    throw new Error('draft must contain exactly the five string fields (title, scenario, gap, desired, context) plus an optional sources array');
+    throw new Error('draft must contain exactly the five string fields (title, scenario, gap, desired, context) plus optional sources, type, and language');
   }
   const sources = 'sources' in draft ? validateSources((draft as Record<string, unknown>).sources) : [];
-  return { action: 'save', draft: { ...(draft as DraftFields), sources } };
+  const candidate = draft as Record<string, unknown>;
+  const type = 'type' in candidate ? candidate.type : 'custom';
+  assertFeedbackType(type);
+  const language = 'language' in candidate ? candidate.language : undefined;
+  assertLanguage(language);
+  return {
+    action: 'save',
+    draft: { ...(draft as DraftFields), sources },
+    type,
+    ...(language !== undefined ? { language } : {}),
+  };
+}
+
+/**
+ * Validate an assist request body: a non-empty session id, an optional
+ * language (zh/en/absent), a current feedback type, and validated confirmed
+ * sources. Anything else fails loud at the wire boundary so the model call
+ * only ever receives user-confirmed material.
+ *
+ * @param body - parsed request body.
+ * @returns the validated assist input.
+ * @throws {Error} describing the first invalid aspect.
+ */
+function parseAssistRequest(body: unknown): AssistInput {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error('body must be an object');
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record.sessionId !== 'string' || record.sessionId.trim() === '') {
+    throw new Error('sessionId must be a non-empty string');
+  }
+  const language = record.language ?? null;
+  if (language !== null && language !== 'zh' && language !== 'en') {
+    throw new Error('language must be zh, en, or absent');
+  }
+  if (!(FEEDBACK_TYPES as readonly string[]).includes(record.currentType as string)) {
+    throw new Error('currentType must be one of: ' + FEEDBACK_TYPES.join(', '));
+  }
+  const sources = validateSources(record.sources);
+  return {
+    sessionId: record.sessionId,
+    language: language as 'zh' | 'en' | null,
+    currentType: record.currentType as FeedbackType,
+    sources,
+  };
+}
+
+/**
+ * Handle one request on the assist route. POST runs one feedback-assist model
+ * call through the current session's model config and returns the outcome;
+ * the model-visible envelope is appended to the session log before the
+ * response so a call is never left unrecorded. Any other method is refused.
+ *
+ * @param ctx - Cordis context carrying the sessions and llm services.
+ * @param request - the incoming request.
+ * @param response - the server response.
+ * @returns void.
+ */
+async function handleAssistRequest(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method !== 'POST') {
+    writeJson(response, 405, { error: 'method not allowed' }, { allow: 'POST' });
+    return;
+  }
+  let body: unknown;
+  try {
+    body = await readJsonBody(request);
+  } catch (error) {
+    if ((error as HttpError).statusCode === 413) request.resume?.();
+    writeJson(response, (error as HttpError).statusCode ?? 400, { error: (error as Error).message });
+    return;
+  }
+  let input: AssistInput;
+  try {
+    input = parseAssistRequest(body);
+  } catch (error) {
+    writeJson(response, 400, { error: (error as Error).message });
+    return;
+  }
+  const outcome = await runAssist({
+    resolveConfig(sessionId) {
+      const session = ctx.sessions.get(SessionId(sessionId));
+      return session?.requestHeader()?.config;
+    },
+    stream(options) {
+      return ctx.llm.stream(options);
+    },
+  }, input);
+  const session = ctx.sessions.get(SessionId(input.sessionId));
+  if (session !== undefined) {
+    try {
+      session.append('dsh-feedback-bridge/assist', buildAssistEventPayload(outcome, input));
+    } catch {
+      // A model-visible call must never proceed unlogged; failing to record
+      // the envelope fails loud instead of silently dropping the audit trail.
+      writeJson(response, 500, { error: 'failed to record the assist call' });
+      return;
+    }
+  }
+  writeJson(response, 200, outcome);
 }
 
 /**
@@ -402,7 +522,10 @@ async function handleDraftRequest(request: IncomingMessage, response: ServerResp
       if (parsed.action === 'remove') {
         await remove(filePath);
       } else {
-        await save(filePath, parsed.draft, parsed.draft.sources);
+        await save(filePath, parsed.draft, parsed.draft.sources, {
+          type: parsed.type,
+          ...(parsed.language !== undefined ? { language: parsed.language } : {}),
+        });
       }
       writeJson(response, 200, { ok: true });
     } catch {
@@ -439,4 +562,11 @@ export function apply(ctx: Context): void {
       handler: handleDraftRequest,
     } satisfies WebRoute);
   }, 'dsh-feedback-bridge: draft route');
+  ctx.effect(() => {
+    return ctx.webServer.register({
+      kind: 'exact',
+      path: ASSIST_PATH,
+      handler: (request, response) => handleAssistRequest(ctx, request, response),
+    } satisfies WebRoute);
+  }, 'dsh-feedback-bridge: assist route');
 }

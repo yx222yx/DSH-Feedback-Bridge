@@ -144,6 +144,14 @@ function sessionsWith(draft, sources = []) {
     },
     update() {},
     restore() {},
+    getType() {
+      return draft.type;
+    },
+    setType() {},
+    getLanguage() {
+      return draft.language;
+    },
+    setLanguage() {},
     getSources() {
       return sources;
     },
@@ -217,7 +225,16 @@ test('feedback workspace renders the five editable fields, type badge, preview a
   };
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), onClose: () => {} }, 'zh');
   assert.match(html, /data-testid="dsh-feedback-workspace"/);
-  assert.match(html, /data-testid="dsh-feedback-type">自定义反馈<\/span>/);
+  // The type is a four-way selector with custom pre-selected.
+  assert.match(html, /data-testid="dsh-feedback-type-select"/);
+  assert.match(html, /<option value="custom" selected[^>]*>自定义反馈<\/option>/);
+  assert.match(html, /<option value="plugin-request">插件需求<\/option>/);
+  assert.match(html, /<option value="harness-feature">Harness 功能建议<\/option>/);
+  assert.match(html, /<option value="harness-defect">Harness 缺陷报告<\/option>/);
+  // The language selector defaults to the English default and offers zh/en.
+  assert.match(html, /data-testid="dsh-feedback-language-select"/);
+  assert.match(html, /<option value="" selected[^>]*>默认（英文）<\/option>/);
+  assert.match(html, /<option value="zh">中文<\/option>/);
   assert.match(html, /data-testid="dsh-feedback-draft-label">进行中的草稿<\/span>/);
   assert.match(html, /data-testid="dsh-feedback-title"/);
   assert.match(html, /data-testid="dsh-feedback-scenario"/);
@@ -234,6 +251,39 @@ test('feedback workspace renders the five editable fields, type badge, preview a
   assert.match(html, /data-testid="dsh-feedback-export">导出草稿<\/button>/);
   assert.match(html, /data-testid="dsh-feedback-cancel">取消<\/button>/);
   assert.match(html, /aria-label="关闭"/);
+});
+
+test('workspace renders the assist control disabled until a session and confirmed sources exist', () => {
+  // No session and no sources: the generate button is disabled.
+  const without = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), conversation: null, onClose: () => {} }, 'en');
+  assert.match(without, /data-testid="dsh-feedback-assist-run" disabled/);
+
+  // With a session and one confirmed source the button is enabled.
+  const record = {
+    id: 'session-1:node:user:1',
+    sessionId: 'session-1',
+    kind: 'message',
+    role: 'user',
+    label: 'User message',
+    text: 'SENTINEL_CONFIRMED',
+    truncated: false,
+    sensitive: false,
+    capturedAt: '2026-01-01T00:00:00.000Z',
+  };
+  const conversation = conversationSourceWith([userNode(1, [textBlock('SENTINEL_CONFIRMED')])]);
+  const withSource = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft(), [record]), persistence: persistenceStub(), conversation, onClose: () => {} }, 'en');
+  assert.match(withSource, /data-testid="dsh-feedback-assist-run"/);
+  assert.doesNotMatch(withSource, /data-testid="dsh-feedback-assist-run" disabled/);
+});
+
+test('workspace renders the advisory privacy panel for a credential marker without rewriting the field', () => {
+  const draft = { ...moduleExports.emptyFeedbackDraft(), gap: 'the api key is sk-abcdef1234567890xyz' };
+  const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), onClose: () => {} }, 'en');
+  assert.match(html, /data-testid="dsh-feedback-privacy"/);
+  assert.match(html, /data-testid="dsh-feedback-privacy-finding"/);
+  assert.match(html, /Critical/);
+  // The public field renders verbatim; the finding never rewrites it.
+  assert.match(html, /the api key is sk-abcdef1234567890xyz/);
 });
 
 test('feedback workspace guidance links to the official DSH Discussions destination', () => {
@@ -348,7 +398,9 @@ test('feedback workspace renders English labels and English markdown headings wh
     context: '',
   };
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), onClose: () => {} }, 'en');
-  assert.match(html, /data-testid="dsh-feedback-type">Custom feedback<\/span>/);
+  assert.match(html, /data-testid="dsh-feedback-type-select"/);
+  assert.match(html, /<option value="custom" selected[^>]*>Custom feedback<\/option>/);
+  assert.match(html, /<option value="" selected[^>]*>Default \(English\)<\/option>/);
   assert.match(html, /data-testid="dsh-feedback-draft-label">In-progress draft<\/span>/);
   assert.match(html, /data-testid="dsh-feedback-copy">Copy draft<\/button>/);
   assert.match(html, /# Add a plugin API/);

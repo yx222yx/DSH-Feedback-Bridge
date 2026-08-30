@@ -5,7 +5,7 @@ import { test } from 'node:test';
 test('Host entry resolves through the package exports map with the plugin contract', async () => {
   const host = await import('dsh-feedback-bridge');
   assert.equal(host.name, 'dsh-feedback-bridge');
-  assert.deepEqual(host.inject, ['webServer']);
+  assert.deepEqual(host.inject, ['webServer', 'sessions', 'llm']);
   assert.equal(typeof host.apply, 'function');
   for (const helper of [
     'compatibilityRangeOf',

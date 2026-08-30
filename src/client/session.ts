@@ -1,4 +1,4 @@
-import type { FeedbackDraft, FeedbackDraftFields, FeedbackFieldKey, FeedbackSessionController } from './types.js';
+import type { DraftLanguage, FeedbackDraft, FeedbackDraftFields, FeedbackFieldKey, FeedbackSessionController, FeedbackType } from './types.js';
 import type { ConfirmedSourceRecord } from './sources.js';
 
 /** Section headings passed to the Markdown builder, locale-owned at the call site. */
@@ -10,8 +10,9 @@ export interface DraftMarkdownHeadings {
 }
 
 /**
- * A fresh custom-feedback draft: five editable fields plus the fixed
- * custom-feedback session type. Nothing here is persisted.
+ * A fresh custom-feedback draft: five editable fields, the custom-feedback
+ * type, and no selected language (the English default). Nothing here is
+ * persisted.
  *
  * @returns the empty draft object.
  */
@@ -75,6 +76,19 @@ export function createFeedbackSessionController(): FeedbackSessionController {
     },
     restore(persisted: FeedbackDraft) {
       draft = { ...persisted };
+    },
+    getType() {
+      return draft?.type ?? 'custom';
+    },
+    setType(type: FeedbackType) {
+      if (draft !== null) draft = { ...draft, type };
+    },
+    getLanguage() {
+      return draft?.language;
+    },
+    setLanguage(language: DraftLanguage | undefined) {
+      if (draft === null) return;
+      draft = language === undefined ? { ...draft, language: undefined } : { ...draft, language };
     },
     getSources() {
       return sources;

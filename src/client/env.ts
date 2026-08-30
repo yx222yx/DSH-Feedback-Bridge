@@ -1,4 +1,4 @@
-import { DRAFT_PATH, STATUS_PATH } from './constants.js';
+import { ASSIST_PATH, DRAFT_PATH, STATUS_PATH } from './constants.js';
 
 /**
  * Resolve the same-origin Host status route under the document base URL.
@@ -18,4 +18,14 @@ export function statusUrl(): string {
 export function draftUrl(): string {
   if (typeof document === 'undefined') return DRAFT_PATH;
   return new URL('dsh-feedback-bridge/draft', document.baseURI).pathname;
+}
+
+/**
+ * Resolve the same-origin Host assist route under the document base URL.
+ *
+ * @returns the assist route pathname.
+ */
+export function assistUrl(): string {
+  if (typeof document === 'undefined') return ASSIST_PATH;
+  return new URL('dsh-feedback-bridge/assist', document.baseURI).pathname;
 }

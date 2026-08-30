@@ -1,0 +1,5 @@
+# Test-only fake LLM bundle patch: insert one host row that intercepts the
+# llm/stream waterfall for non-loop (hand-built) model calls.
+- insert:
+    - id: dsh-feedback-bridge-test-fake-llm
+      name: 'dsh-feedback-bridge-test-fake-llm'

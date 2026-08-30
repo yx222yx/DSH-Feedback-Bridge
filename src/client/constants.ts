@@ -7,6 +7,9 @@ export const STATUS_PATH = '/dsh-feedback-bridge/status';
 /** Host draft route path, used before a document base URL is available. */
 export const DRAFT_PATH = '/dsh-feedback-bridge/draft';
 
+/** Host feedback-assist route path, used before a document base URL is available. */
+export const ASSIST_PATH = '/dsh-feedback-bridge/assist';
+
 /**
  * Non-localized product-policy constant: the official DeepSeek Harness
  * GitHub Discussions destination for manual submission guidance. Kept out

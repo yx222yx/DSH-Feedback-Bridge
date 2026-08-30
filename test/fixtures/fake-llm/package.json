@@ -1,0 +1,17 @@
+{
+  "name": "dsh-feedback-bridge-test-fake-llm",
+  "version": "0.0.0",
+  "description": "Test-only fake LLM stream interceptor for DSH Feedback Bridge acceptance tests. Never shipped.",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "private": true
+}

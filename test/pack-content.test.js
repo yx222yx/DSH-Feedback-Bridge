@@ -6,16 +6,21 @@ import { test } from 'node:test';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
 test('npm pack ships exactly the intended runtime files and nothing else', () => {
-  const [result] = JSON.parse(
-    execFileSync('npm', ['pack', '--json'], { cwd: repoRoot, encoding: 'utf8' }),
-  );
+  // Some pnpm versions print a dependency-verification preamble before the
+  // JSON payload; locate the array by its opening bracket.
+  const output = execFileSync('npm', ['pack', '--json'], { cwd: repoRoot, encoding: 'utf8' });
+  const [result] = JSON.parse(output.slice(output.indexOf('[')));
   const paths = result.files.map((entry) => entry.path).sort();
   assert.deepEqual(paths, [
     'LICENSE',
     'README.md',
     'cordis.patch.yml',
+    'lib/assist-event.js',
+    'lib/assist-schema.js',
+    'lib/assist.js',
     'lib/client.js',
     'lib/draft-store.js',
+    'lib/feedback-types.js',
     'lib/index.js',
     'package.json',
   ]);

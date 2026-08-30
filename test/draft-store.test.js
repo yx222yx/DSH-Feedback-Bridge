@@ -35,7 +35,7 @@ test('save writes the minimal v2 record (five fields, empty sources, version, up
     const saved = await save(filePath, sampleDraft());
     assert.equal(saved.version, DRAFT_SCHEMA_VERSION);
     assert.equal(typeof saved.updatedAt, 'string');
-    assert.deepEqual(Object.keys(saved).sort(), ['context', 'desired', 'gap', 'scenario', 'sources', 'title', 'updatedAt', 'version']);
+    assert.deepEqual(Object.keys(saved).sort(), ['context', 'desired', 'gap', 'scenario', 'sources', 'title', 'type', 'updatedAt', 'version']);
 
     const loaded = await load(filePath);
     assert.deepEqual(loaded, {
@@ -46,6 +46,7 @@ test('save writes the minimal v2 record (five fields, empty sources, version, up
       desired: '期望',
       context: '上下文',
       sources: [],
+      type: 'custom',
       updatedAt: saved.updatedAt,
     });
   } finally {
@@ -328,3 +329,117 @@ test('resolveDshHome treats a blank DSH_HOME as unset', () => {
     else process.env.DSH_HOME = previous;
   }
 });
+
+test('save persists the feedback type and language and load round-trips them', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const saved = await save(filePath, sampleDraft(), [], { type: 'harness-defect', language: 'zh' });
+    assert.equal(saved.type, 'harness-defect');
+    assert.equal(saved.language, 'zh');
+    const loaded = await load(filePath);
+    assert.equal(loaded.type, 'harness-defect');
+    assert.equal(loaded.language, 'zh');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('save defaults the feedback type to custom and omits an unset language', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const saved = await save(filePath, sampleDraft());
+    assert.equal(saved.type, 'custom');
+    assert.equal('language' in saved, false);
+    const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+    assert.equal(raw.type, 'custom');
+    assert.equal('language' in raw, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('save rejects an invalid feedback type or language', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    await assert.rejects(() => save(filePath, sampleDraft(), [], { type: 'mystery' }), /feedback type/);
+    await assert.rejects(() => save(filePath, sampleDraft(), [], { type: 'custom', language: 'fr' }), /language/);
+    assert.equal(await load(filePath), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('load migrates a version-2 record to version 3 with the custom type and an unset language', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const v2 = {
+      version: 2,
+      title: '旧版',
+      scenario: '',
+      gap: '',
+      desired: '',
+      context: '',
+      sources: [sampleSource()],
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    writeFileSync(filePath, JSON.stringify(v2), 'utf8');
+    const loaded = await load(filePath);
+    assert.equal(loaded.version, DRAFT_SCHEMA_VERSION);
+    assert.equal(loaded.type, 'custom');
+    assert.equal('language' in loaded, false);
+    assert.deepEqual(loaded.sources, v2.sources);
+    assert.equal(JSON.parse(readFileSync(filePath, 'utf8')).version, 2); // not rewritten by a read
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('load migrates a version-1 record to version 3 with empty sources and the custom type', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    const v1 = {
+      version: 1,
+      title: '更旧',
+      scenario: '',
+      gap: '',
+      desired: '',
+      context: '',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    };
+    writeFileSync(filePath, JSON.stringify(v1), 'utf8');
+    const loaded = await load(filePath);
+    assert.equal(loaded.version, DRAFT_SCHEMA_VERSION);
+    assert.equal(loaded.type, 'custom');
+    assert.deepEqual(loaded.sources, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('load isolates a version-3 record with an invalid feedback type', async () => {
+  const dir = tempDir();
+  try {
+    const filePath = join(dir, 'draft.json');
+    writeFileSync(filePath, JSON.stringify({
+      version: 3,
+      title: 'x',
+      scenario: '',
+      gap: '',
+      desired: '',
+      context: '',
+      sources: [],
+      type: 'mystery',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }), 'utf8');
+    assert.equal(await load(filePath), null);
+    assert.equal(readdirSync(dir).filter((entry) => entry.startsWith('draft.json.corrupt-')).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

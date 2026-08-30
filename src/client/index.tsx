@@ -4,7 +4,7 @@ import { NS, OFFICIAL_DISCUSSIONS_URL } from './constants.js';
 import { createConversationSource } from './conversation.js';
 import type { ConversationSource } from './conversation.js';
 import { dictionaries } from './dictionaries.js';
-import { draftUrl } from './env.js';
+import { assistUrl, draftUrl } from './env.js';
 import { injectStyles } from './styles.js';
 import { createFeedbackSessionController } from './session.js';
 import { createDraftPersistence } from './persistence.js';
@@ -24,6 +24,8 @@ import {
 } from './sources.js';
 import { FeedbackTrigger } from './components/FeedbackTrigger.js';
 import { StatusSection } from './components/StatusSection.js';
+import { createAssistTransport, effectiveLanguage } from './assist.js';
+import { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
 
 const name = 'dsh-feedback-bridge';
 const inject = ['slots', 'locale', 'sessions'];
@@ -37,6 +39,8 @@ export {
   feedbackDraftFileName,
 } from './session.js';
 export { createDraftPersistence } from './persistence.js';
+export { createAssistTransport, effectiveLanguage, revalidateRepairText } from './assist.js';
+export { scanPrivacy, EXCESS_CONTEXT_BYTES, PRIVACY_EXCERPT_CHARS } from './privacy.js';
 export { FeedbackTrigger } from './components/FeedbackTrigger.js';
 export { FeedbackWorkspace } from './components/FeedbackWorkspace.js';
 export {
@@ -53,6 +57,17 @@ export {
   SOURCE_CAPTURE_CAP,
   SOURCE_PREVIEW_CHARS,
 } from './sources.js';
+export type {
+  AssistOutcome,
+  AssistRequest,
+  AssistSuggestion,
+  AssistTransport,
+  DraftLanguage,
+  FeedbackType,
+  PrivacyFinding,
+  PrivacyFindingKind,
+  PrivacySeverity,
+} from './types.js';
 export type {
   ConfirmedSourceRecord,
   FeedbackSourceCandidate,
@@ -79,6 +94,7 @@ export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS);
   const sessions = createFeedbackSessionController();
   const persistence = createDraftPersistence({ draftUrl: draftUrl() });
+  const assistTransport = createAssistTransport({ assistUrl: assistUrl() });
   // The current-conversation read rides the official `ctx.sessions` face;
   // the `sessions` entry in the inject list above makes it always present.
   const conversation: ConversationSource = createConversationSource(ctx.sessions);
@@ -89,7 +105,7 @@ export function apply(ctx: ClientContext): void {
         id: 'dsh-feedback-bridge',
         locale: NS,
       }, (props) => (
-        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} conversation={conversation} />
+        <FeedbackTrigger {...props} t={t} sessions={sessions} persistence={persistence} assistTransport={assistTransport} conversation={conversation} />
       ))),
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',

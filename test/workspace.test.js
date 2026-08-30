@@ -398,7 +398,7 @@ test('opening the workspace starts a custom-feedback session and typing updates 
   const h = setupWorkspace();
   let vnode = h.render(h.workspace);
   assert.ok(findByTestId(vnode, 'dsh-feedback-workspace'));
-  assert.equal(findByTestId(vnode, 'dsh-feedback-type').children.join(''), '自定义反馈');
+  assert.equal(findByTestId(vnode, 'dsh-feedback-type-select').props.value, 'custom');
   assert.ok(findByTestId(vnode, 'dsh-feedback-draft-label'));
 
   const set = (testid, value) => {
@@ -452,7 +452,7 @@ test('typing autosaves the draft to the host and the queue posts the latest fiel
   const saves = h.state.fetchLog.filter((entry) => entry.init?.method === 'POST' && JSON.parse(entry.init.body).action === 'save');
   assert.ok(saves.length >= 2);
   const last = JSON.parse(saves[saves.length - 1].init.body);
-  assert.deepEqual(last.draft, { title: '自动保存的标题', scenario: '自动保存的场景', gap: '', desired: '', context: '' });
+  assert.deepEqual(last.draft, { title: '自动保存的标题', scenario: '自动保存的场景', gap: '', desired: '', context: '', type: 'custom' });
   assert.deepEqual(h.state.persisted, last.draft);
 });
 

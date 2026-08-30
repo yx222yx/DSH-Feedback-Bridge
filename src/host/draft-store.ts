@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { FEEDBACK_TYPES, type FeedbackType } from './feedback-types.js';
 
 /** Five editable draft fields a persisted record must carry as strings. */
 export interface DraftFields {
@@ -11,6 +12,12 @@ export interface DraftFields {
   desired: string;
   context: string;
 }
+
+export type { FeedbackType } from './feedback-types.js';
+export { FEEDBACK_TYPES } from './feedback-types.js';
+
+/** Accepted submission languages; absence means the English default. */
+export type DraftLanguage = 'zh' | 'en';
 
 /** Material class of one confirmed feedback source. */
 export type SourceKind = 'message' | 'tool-result' | 'diagnostic';
@@ -36,20 +43,31 @@ export interface ConfirmedSourceRecord {
   capturedAt: string;
 }
 
-/** A persisted draft record: schema version plus the five fields, sources, and updatedAt. */
+/** A persisted draft record: schema version plus the five fields, sources, feedback type, language, and updatedAt. */
 export interface StoredDraft extends DraftFields {
   version: typeof DRAFT_SCHEMA_VERSION;
   sources: ConfirmedSourceRecord[];
+  /** Authoritative, user-overridable feedback type; the model recommendation never replaces it directly. */
+  type: FeedbackType;
+  /** User-selected submission language; absent means the English default. */
+  language?: DraftLanguage;
   updatedAt: string;
+}
+
+/** Draft state the store stamps besides the five public fields: the feedback type and optional language. */
+export interface DraftMeta {
+  type: FeedbackType;
+  language?: DraftLanguage;
 }
 
 /**
  * On-disk schema version of the persisted feedback draft. Bump on any
  * incompatible change to the stored record; unknown versions are quarantined
  * by {@link load} rather than interpreted. Version 2 adds the confirmed
- * sources array; version-1 records migrate in memory with empty sources.
+ * sources array; version 3 adds the authoritative feedback type and the
+ * optional submission language; version-1 and -2 records migrate in memory.
  */
-export const DRAFT_SCHEMA_VERSION = 2;
+export const DRAFT_SCHEMA_VERSION = 3;
 
 /** Maximum confirmed sources one draft may carry. */
 export const MAX_SOURCES = 32;
@@ -59,6 +77,20 @@ export const MAX_SOURCE_TEXT = 16 * 1024;
 
 /** Draft fields a persisted record must carry as strings. */
 const DRAFT_FIELDS = ['title', 'scenario', 'gap', 'desired', 'context'] as const;
+
+/** Assert one parsed value is an accepted feedback type, naming the offender. */
+export function assertFeedbackType(value: unknown): asserts value is FeedbackType {
+  if (!(FEEDBACK_TYPES as readonly string[]).includes(value as string)) {
+    throw new Error('draft feedback type must be one of: ' + FEEDBACK_TYPES.join(', '));
+  }
+}
+
+/** Assert one parsed value is an accepted submission language, when present. */
+export function assertLanguage(value: unknown): asserts value is DraftLanguage | undefined {
+  if (value !== undefined && value !== 'zh' && value !== 'en') {
+    throw new Error('draft language must be zh or en');
+  }
+}
 
 /** The exact key roster a confirmed source record must carry. */
 const SOURCE_KEYS = ['id', 'sessionId', 'kind', 'role', 'label', 'text', 'truncated', 'sensitive', 'capturedAt'] as const;
@@ -257,12 +289,30 @@ function normalizeRecord(record: unknown): StoredDraft | null {
     context: candidate.context,
   } as DraftFields;
   if (candidate.version === 1) {
-    return { version: DRAFT_SCHEMA_VERSION, ...fields, sources: [], updatedAt: candidate.updatedAt };
+    return { version: DRAFT_SCHEMA_VERSION, ...fields, sources: [], type: 'custom', updatedAt: candidate.updatedAt };
+  }
+  if (candidate.version === 2) {
+    try {
+      const sources = validateSources(candidate.sources);
+      return { version: DRAFT_SCHEMA_VERSION, ...fields, sources, type: 'custom', updatedAt: candidate.updatedAt };
+    } catch {
+      return null;
+    }
   }
   if (candidate.version !== DRAFT_SCHEMA_VERSION) return null;
   try {
     const sources = validateSources(candidate.sources);
-    return { version: DRAFT_SCHEMA_VERSION, ...fields, sources, updatedAt: candidate.updatedAt };
+    assertFeedbackType(candidate.type);
+    assertLanguage(candidate.language);
+    const record: StoredDraft = {
+      version: DRAFT_SCHEMA_VERSION,
+      ...fields,
+      sources,
+      type: candidate.type,
+      updatedAt: candidate.updatedAt,
+    };
+    if (candidate.language !== undefined) record.language = candidate.language;
+    return record;
   } catch {
     return null;
   }
@@ -284,13 +334,18 @@ export async function save(
   filePath: string,
   draft: DraftFields,
   sources: readonly ConfirmedSourceRecord[] = [],
+  meta: DraftMeta = { type: 'custom' },
 ): Promise<StoredDraft> {
   assertDraftFields(draft);
   const validated = validateSources(sources);
+  assertFeedbackType(meta.type);
+  assertLanguage(meta.language);
   const record: StoredDraft = {
     version: DRAFT_SCHEMA_VERSION,
     ...draft,
     sources: validated,
+    type: meta.type,
+    ...(meta.language !== undefined ? { language: meta.language } : {}),
     updatedAt: new Date().toISOString(),
   };
   const serialized = JSON.stringify(record, null, 2) + '\n';

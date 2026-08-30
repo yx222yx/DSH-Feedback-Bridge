@@ -92,7 +92,7 @@ test('save posts exactly the five draft fields plus the confirmed sources', asyn
   assert.equal(await persistence.save({ ...fields(), type: 'custom', version: 99 }, sources), true);
   assert.equal(fake.log.length, 1);
   assert.equal(fake.log[0].init.method, 'POST');
-  assert.deepEqual(JSON.parse(fake.log[0].init.body), { action: 'save', draft: { ...fields(), sources } });
+  assert.deepEqual(JSON.parse(fake.log[0].init.body), { action: 'save', draft: { ...fields(), type: 'custom', sources } });
 });
 
 test('save omits the sources key when no sources are confirmed', async () => {
@@ -110,7 +110,7 @@ test('load resolves fields and sources from a GET and null when empty', async ()
   assert.equal(await persistence.load(), null);
   const sources = [sampleSource()];
   await persistence.save(fields(), sources);
-  assert.deepEqual(await persistence.load(), { fields: fields(), sources });
+  assert.deepEqual(await persistence.load(), { fields: fields(), sources, type: 'custom' });
 });
 
 test('remove posts the remove action and subsequent loads resolve null', async () => {

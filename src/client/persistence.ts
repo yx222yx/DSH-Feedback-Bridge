@@ -1,5 +1,5 @@
 import type { ConfirmedSourceRecord } from './sources.js';
-import type { DraftPersistence, FeedbackDraftFields, FetchLike, FetchResponseLike, PersistedFeedbackDraft } from './types.js';
+import type { DraftLanguage, DraftPersistence, FeedbackDraft, FeedbackType, FetchLike, FetchResponseLike, PersistedFeedbackDraft } from './types.js';
 
 /** The five editable fields a save payload carries; the Host stamps version and updatedAt. */
 const DRAFT_FIELDS = ['title', 'scenario', 'gap', 'desired', 'context'] as const;
@@ -36,14 +36,16 @@ export function createDraftPersistence({
     return run;
   }
 
-  function pickDraft(draft: FeedbackDraftFields): Record<string, string> {
+  function pickDraft(draft: FeedbackDraft): Record<string, string> {
     const picked: Record<string, string> = {};
     for (const key of DRAFT_FIELDS) picked[key] = draft[key];
     return picked;
   }
 
-  function payload(draft: FeedbackDraftFields, sources: readonly ConfirmedSourceRecord[]): Record<string, unknown> {
+  function payload(draft: FeedbackDraft, sources: readonly ConfirmedSourceRecord[]): Record<string, unknown> {
     const body: Record<string, unknown> = pickDraft(draft);
+    body.type = draft.type;
+    if (draft.language !== undefined) body.language = draft.language;
     if (sources.length > 0) body.sources = [...sources];
     return body;
   }
@@ -66,16 +68,25 @@ export function createDraftPersistence({
         .then((data) => {
           const record = (data as { draft?: { [key: string]: unknown } | null }).draft ?? null;
           if (record === null) return null;
-          const fields: FeedbackDraftFields = { title: '', scenario: '', gap: '', desired: '', context: '' };
+          const fields = { title: '', scenario: '', gap: '', desired: '', context: '' } as FeedbackDraft;
           for (const key of DRAFT_FIELDS) {
             if (typeof record[key] === 'string') fields[key] = record[key];
           }
           const rawSources = record.sources;
           const sources = Array.isArray(rawSources) ? (rawSources as ConfirmedSourceRecord[]) : [];
-          return { fields, sources } as PersistedFeedbackDraft;
+          const type: FeedbackType = record.type === 'plugin-request' || record.type === 'harness-feature'
+            || record.type === 'harness-defect' || record.type === 'custom'
+            ? record.type
+            : 'custom';
+          const language: DraftLanguage | undefined = record.language === 'zh' || record.language === 'en'
+            ? record.language
+            : undefined;
+          const loaded: PersistedFeedbackDraft = { fields, sources, type };
+          if (language !== undefined) loaded.language = language;
+          return loaded;
         }));
     },
-    save(draft: FeedbackDraftFields, sources: readonly ConfirmedSourceRecord[]) {
+    save(draft: FeedbackDraft, sources: readonly ConfirmedSourceRecord[]) {
       const token = generation;
       return enqueue(() => {
         if (token !== generation) return false;
@@ -94,7 +105,7 @@ export function createDraftPersistence({
         body: JSON.stringify({ action: 'remove' }),
       }).then(check));
     },
-    keepalive(draft: FeedbackDraftFields | null, sources: readonly ConfirmedSourceRecord[]) {
+    keepalive(draft: FeedbackDraft | null, sources: readonly ConfirmedSourceRecord[]) {
       if (draft === null) return;
       const token = generation;
       if (token !== generation) return;

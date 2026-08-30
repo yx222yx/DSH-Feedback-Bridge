@@ -2,6 +2,8 @@ import React from 'react';
 import { OFFICIAL_DISCUSSIONS_URL } from '../constants.js';
 import { statusUrl } from '../env.js';
 import { buildDraftMarkdown, feedbackDraftFileName } from '../session.js';
+import { revalidateRepairText } from '../assist.js';
+import { scanPrivacy } from '../privacy.js';
 import {
   applyRecommendations,
   confirmSourceCandidate,
@@ -12,11 +14,16 @@ import {
 import type { ConfirmedSourceRecord, FeedbackSourceCandidate } from '../sources.js';
 import type { ConversationRead, ConversationSource } from '../conversation.js';
 import type {
-  DraftPersistence,
+  AssistSuggestion,
+  AssistTransport,
+  DraftLanguage,
   FeedbackDraft,
   FeedbackDraftFields,
   FeedbackFieldKey,
   FeedbackSessionController,
+  FeedbackType,
+  PrivacyFinding,
+  PrivacyFindingKind,
   T,
   WorkspaceNotice,
 } from '../types.js';
@@ -27,11 +34,18 @@ import type { SourceCopy } from '../sources.js';
 /** Debounce window before an edit triggers an autosave, in milliseconds. */
 const AUTOSAVE_DELAY_MS = 600;
 
+/** The four feedback types in render order, matching the type selector. */
+const TYPE_OPTIONS: FeedbackType[] = ['plugin-request', 'harness-feature', 'harness-defect', 'custom'];
+
+/** The five public draft field keys in render order. */
+const FIELD_KEYS: FeedbackFieldKey[] = ['title', 'scenario', 'gap', 'desired', 'context'];
+
 /** Props of the community-feedback workspace surface. */
 export interface FeedbackWorkspaceProps {
   t: T;
   sessions: FeedbackSessionController;
-  persistence: DraftPersistence;
+  persistence: import('../types.js').DraftPersistence;
+  assistTransport: AssistTransport;
   /** Current-conversation source from `ctx.sessions`; null without a session service. */
   conversation: ConversationSource | null;
   onClose: () => void;
@@ -60,20 +74,28 @@ function useConversationRead(source: ConversationSource | null | undefined): Con
 
 /**
  * Community-feedback workspace: the unified surface opened by the left-nav
- * entry. It edits a custom-feedback draft, shows the exact Markdown that
- * copy/export produce, copies or downloads it, and carries the manual
- * submission guidance for the official DSH Discussions. The persisted
- * draft is restored on open, edits autosave to the Host, closing flushes
- * any pending save, and cancel asks for a confirmation before discarding.
- * No action here performs a GitHub write or any external network request.
+ * entry. It edits a feedback draft (four types, Chinese/English), shows the
+ * exact Markdown that copy/export produce, copies or downloads it, carries
+ * the manual submission guidance, and offers model-assisted suggestions,
+ * repair, and advisory privacy review. Model output is never auto-applied:
+ * applying a suggestion is an explicit per-field action, and a suggestion
+ * that would overwrite a newer edit asks first. No action here performs a
+ * GitHub write or any external network request.
  */
-export function FeedbackWorkspace({ t, sessions, persistence, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
+export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
   const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
   const [notice, setNotice] = React.useState<WorkspaceNotice | null>(null);
   const [confirmDiscard, setConfirmDiscard] = React.useState(false);
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set());
   const [dshVersion, setDshVersion] = React.useState<string | null>(null);
+  const [assistBusy, setAssistBusy] = React.useState(false);
+  const [suggestion, setSuggestion] = React.useState<AssistSuggestion | null>(null);
+  const [repair, setRepair] = React.useState<{ rawText: string; errors: string[] } | null>(null);
+  const [repairText, setRepairText] = React.useState('');
+  const [modelError, setModelError] = React.useState<{ code: string; message: string } | null>(null);
+  const [assistRunAt, setAssistRunAt] = React.useState(0);
+  const [confirmOverwrite, setConfirmOverwrite] = React.useState<FeedbackFieldKey | null>(null);
   const userInteractedRef = React.useRef(false);
   const savedRef = React.useRef<string | null>(null);
   const timerRef = React.useRef<number | null>(null);
@@ -81,6 +103,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   fieldsRef.current = fields;
   const sourcesRef = React.useRef(sources);
   sourcesRef.current = sources;
+  const lastEditAtRef = React.useRef<Record<FeedbackFieldKey, number>>({ title: 0, scenario: 0, gap: 0, desired: 0, context: 0 });
   const conversationRead = useConversationRead(conversation);
   const sourceCopy: SourceCopy = {
     diagTitle: t('sources.diag.title'),
@@ -109,9 +132,26 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   };
   const markdown = buildDraftMarkdown(fields, headings);
   const canExport = String(fields.title ?? '').trim() !== '';
+  const publicFields: FeedbackDraftFields = {
+    title: fields.title,
+    scenario: fields.scenario,
+    gap: fields.gap,
+    desired: fields.desired,
+    context: fields.context,
+  };
+  const privacyFindings: PrivacyFinding[] = scanPrivacy(publicFields, sources);
+  const modelFindings: PrivacyFinding[] = (suggestion?.privacyFindings ?? []).map((finding, index) => ({
+    id: 'privacy:model:' + index,
+    severity: finding.severity,
+    kind: finding.kind as PrivacyFindingKind,
+    location: 'source',
+    excerpt: finding.quote + (finding.reason !== '' ? ' — ' + finding.reason : ''),
+  }));
+  const allFindings = [...privacyFindings, ...modelFindings];
+  const canAssist = conversationRead !== undefined && sources.length > 0 && !assistBusy;
 
   /** Record the fields that are known to be persisted. */
-  const markSaved = (draftFields: FeedbackDraftFields) => {
+  const markSaved = (draftFields: FeedbackDraft) => {
     savedRef.current = JSON.stringify(draftFields);
   };
   /** Whether the current fields differ from the last persisted snapshot. */
@@ -129,7 +169,8 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
         if (userInteractedRef.current) return;
         if (persisted !== null) {
           const resumed: FeedbackDraft = {
-            type: 'custom',
+            type: persisted.type ?? 'custom',
+            ...(persisted.language !== undefined ? { language: persisted.language } : {}),
             title: persisted.fields.title ?? '',
             scenario: persisted.fields.scenario ?? '',
             gap: persisted.fields.gap ?? '',
@@ -216,6 +257,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
     const next = { ...fieldsRef.current, [fieldKey]: current + separator + quoted };
     setFields(next);
     sessions.update({ [fieldKey]: next[fieldKey] });
+    lastEditAtRef.current[fieldKey] = Date.now();
     scheduleAutosave(next);
   };
 
@@ -260,6 +302,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (confirmDiscard) setConfirmDiscard(false);
+        else if (confirmOverwrite !== null) setConfirmOverwrite(null);
         else flushRef.current();
       }
     };
@@ -268,7 +311,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
       return () => window.document.removeEventListener('keydown', onKey);
     }
     return undefined;
-  }, [confirmDiscard]);
+  }, [confirmDiscard, confirmOverwrite]);
 
   // Best-effort unload fallback: the keepalive carries no success
   // semantics and only fires while a draft is open.
@@ -285,11 +328,104 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
 
   const setField = (key: FeedbackFieldKey) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     userInteractedRef.current = true;
+    lastEditAtRef.current[key] = Date.now();
     const value = event.target.value;
     const next = { ...fields, [key]: value };
     setFields(next);
     sessions.update({ [key]: value });
     scheduleAutosave(next);
+  };
+
+  /** User-selected feedback type; the model recommendation never sets this directly. */
+  const handleTypeChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    userInteractedRef.current = true;
+    const next = event.target.value as FeedbackType;
+    const nextFields = { ...fields, type: next };
+    setFields(nextFields);
+    sessions.setType(next);
+    scheduleAutosave(nextFields);
+  };
+
+  /** User-selected submission language; '' clears the selection (English default). */
+  const handleLanguageChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    userInteractedRef.current = true;
+    const raw = event.target.value;
+    const nextLanguage: DraftLanguage | undefined = raw === 'zh' || raw === 'en' ? raw : undefined;
+    const nextFields = { ...fields, ...(nextLanguage === undefined ? { language: undefined } : { language: nextLanguage }) };
+    setFields(nextFields);
+    sessions.setLanguage(nextLanguage);
+    scheduleAutosave(nextFields);
+  };
+
+  /** Run one feedback-assist call; model output is staged, never auto-applied. */
+  const handleAssist = () => {
+    if (conversationRead === undefined || sourcesRef.current.length === 0 || assistBusy) return;
+    const startedAt = Date.now();
+    setAssistBusy(true);
+    setModelError(null);
+    setRepair(null);
+    setSuggestion(null);
+    assistTransport.run({
+      sessionId: conversationRead.sessionId,
+      language: fieldsRef.current.language ?? null,
+      currentType: fieldsRef.current.type,
+      sources: sourcesRef.current,
+    })
+      .then((outcome) => {
+        setAssistBusy(false);
+        if (outcome.status === 'ok') {
+          setSuggestion(outcome.result);
+          setAssistRunAt(Date.now());
+        } else if (outcome.status === 'repair-needed') {
+          setRepair({ rawText: outcome.rawText, errors: outcome.errors });
+          setRepairText(outcome.rawText);
+          setAssistRunAt(startedAt);
+        } else if (outcome.status === 'model-failed') {
+          setModelError({ code: outcome.code, message: outcome.message });
+        } else {
+          setNotice('noModelContext');
+        }
+      })
+      .catch(() => {
+        setAssistBusy(false);
+        setNotice('assistFailed');
+      });
+  };
+
+  /** Apply one suggested field, guarding against overwriting a newer edit. */
+  const applySuggestion = (key: FeedbackFieldKey) => {
+    if (suggestion === null) return;
+    if (lastEditAtRef.current[key] > assistRunAt) {
+      setConfirmOverwrite(key);
+      return;
+    }
+    applySuggestionNow(key);
+  };
+
+  /** Apply one suggested field without further confirmation. */
+  const applySuggestionNow = (key: FeedbackFieldKey) => {
+    if (suggestion === null) return;
+    userInteractedRef.current = true;
+    const value = suggestion.draft[key];
+    const next = { ...fields, [key]: value };
+    setFields(next);
+    sessions.update({ [key]: value });
+    // The applied text is now user content; a later suggestion must guard it.
+    lastEditAtRef.current[key] = Date.now();
+    scheduleAutosave(next);
+    setConfirmOverwrite(null);
+  };
+
+  /** Re-validate a repaired raw response locally; no model call is made. */
+  const handleRevalidate = () => {
+    const outcome = revalidateRepairText(repairText);
+    if (outcome.status === 'ok') {
+      setSuggestion(outcome.result);
+      setRepair(null);
+      setAssistRunAt(Date.now());
+    } else {
+      setRepair({ rawText: repairText, errors: outcome.errors });
+    }
   };
 
   const handleCopy = () => {
@@ -327,9 +463,10 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   const keepEditing = () => {
     setConfirmDiscard(false);
   };
-  /** Mask click dismisses an open discard confirmation, otherwise closes. */
+  /** Mask click dismisses an open confirmation, otherwise closes. */
   const onMaskClick = () => {
     if (confirmDiscard) setConfirmDiscard(false);
+    else if (confirmOverwrite !== null) setConfirmOverwrite(null);
     else flushAndClose();
   };
 
@@ -359,7 +496,33 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
         <header className="dsh-feedback-header">
           <div className="dsh-feedback-header-titles">
             <h2 className="dsh-feedback-title">{t('workspace.title')}</h2>
-            <span className="dsh-feedback-type" data-testid="dsh-feedback-type">{t('workspace.type')}</span>
+            <select
+              className="dsh-feedback-type"
+              data-testid="dsh-feedback-type-select"
+              aria-label={t('field.type')}
+              value={fields.type}
+              onChange={handleTypeChange}
+            >
+              {TYPE_OPTIONS.map((option) => (
+                <option key={option} value={option}>{t(('type.' + option) as import('../types.js').FeedbackBridgeKey)}</option>
+              ))}
+            </select>
+            {suggestion !== null && suggestion.type !== fields.type ? (
+              <span className="dsh-feedback-type-badge" data-testid="dsh-feedback-type-recommendation">
+                {t('assist.recommendedType')}: {t(('type.' + suggestion.type) as import('../types.js').FeedbackBridgeKey)}
+              </span>
+            ) : null}
+            <select
+              className="dsh-feedback-language"
+              data-testid="dsh-feedback-language-select"
+              aria-label={t('language.label')}
+              value={fields.language ?? ''}
+              onChange={handleLanguageChange}
+            >
+              <option value="">{t('language.default')}</option>
+              <option value="zh">{t('language.zh')}</option>
+              <option value="en">{t('language.en')}</option>
+            </select>
             <span className="dsh-feedback-type" data-testid="dsh-feedback-draft-label">{t('workspace.draftLabel')}</span>
           </div>
           <button
@@ -385,6 +548,103 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
             onRemove={handleRemove}
             onQuote={handleQuote}
           />
+          <section className="dsh-feedback-assist" data-testid="dsh-feedback-assist">
+            <h3 className="dsh-feedback-section-title">{t('assist.title')}</h3>
+            <div className="dsh-feedback-assist-actions">
+              <button
+                type="button"
+                className="dsh-feedback-action dsh-feedback-action-primary"
+                data-testid="dsh-feedback-assist-run"
+                disabled={!canAssist}
+                onClick={handleAssist}
+              >
+                {assistBusy ? t('assist.generating') : t('assist.generate')}
+              </button>
+              {!canAssist && !assistBusy ? (
+                <p className="dsh-feedback-hint" data-testid="dsh-feedback-assist-hint">{t('assist.noSourcesOrSession')}</p>
+              ) : null}
+            </div>
+            {modelError !== null ? (
+              <div className="dsh-feedback-assist-error" data-testid="dsh-feedback-assist-error">
+                <p>{t('assist.modelFailed')}</p>
+                <p className="dsh-feedback-assist-error-detail">{modelError.code}: {modelError.message}</p>
+                <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-assist-retry" onClick={handleAssist}>
+                  {t('assist.retry')}
+                </button>
+              </div>
+            ) : null}
+            {suggestion !== null ? (
+              <div className="dsh-feedback-assist-result" data-testid="dsh-feedback-assist-result">
+                {suggestion.type !== fields.type ? (
+                  <div className="dsh-feedback-assist-recommendation" data-testid="dsh-feedback-assist-recommendation">
+                    <p><strong>{t('assist.recommendedType')}:</strong> {t(('type.' + suggestion.type) as import('../types.js').FeedbackBridgeKey)}</p>
+                    <p>{suggestion.typeReason}</p>
+                    <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-assist-apply-type" onClick={() => handleTypeChange({ target: { value: suggestion.type } } as React.ChangeEvent<HTMLSelectElement>)}>
+                      {t('assist.useRecommendedType')}
+                    </button>
+                  </div>
+                ) : null}
+                {suggestion.missingInfo.length > 0 ? (
+                  <ul className="dsh-feedback-assist-missing" data-testid="dsh-feedback-assist-missing">
+                    {suggestion.missingInfo.map((item, index) => (
+                      <li key={index}>
+                        <span className={'dsh-feedback-assist-importance dsh-feedback-assist-importance-' + item.importance}>
+                          {t(('assist.importance.' + item.importance) as import('../types.js').FeedbackBridgeKey)}
+                        </span>
+                        {item.field}: {item.reason}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <div className="dsh-feedback-assist-draft" data-testid="dsh-feedback-assist-draft">
+                  {FIELD_KEYS.map((key) => (
+                    <div key={key} className="dsh-feedback-assist-field">
+                      <span className="dsh-feedback-assist-field-label">{t(('field.' + key) as import('../types.js').FeedbackBridgeKey)}</span>
+                      <span className="dsh-feedback-assist-suggested" data-testid={'dsh-feedback-assist-suggested-' + key}>{suggestion.draft[key]}</span>
+                      <button
+                        type="button"
+                        className="dsh-feedback-action"
+                        data-testid={'dsh-feedback-assist-apply-' + key}
+                        onClick={() => applySuggestion(key)}
+                      >
+                        {t('assist.apply')}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {repair !== null ? (
+              <div className="dsh-feedback-assist-repair" data-testid="dsh-feedback-assist-repair">
+                <p>{t('assist.repairTitle')}</p>
+                <ul className="dsh-feedback-assist-repair-errors">
+                  {repair.errors.map((error, index) => <li key={index}>{error}</li>)}
+                </ul>
+                <textarea data-testid="dsh-feedback-assist-repair-text" rows={6} value={repairText} onChange={(event) => setRepairText(event.target.value)} />
+                <div className="dsh-feedback-assist-actions">
+                  <button type="button" className="dsh-feedback-action dsh-feedback-action-primary" data-testid="dsh-feedback-assist-revalidate" onClick={handleRevalidate}>
+                    {t('assist.revalidate')}
+                  </button>
+                  <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-assist-repair-discard" onClick={() => setRepair(null)}>
+                    {t('assist.discardRepair')}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </section>
+          {allFindings.length > 0 ? (
+            <section className="dsh-feedback-privacy" data-testid="dsh-feedback-privacy">
+              <h3 className="dsh-feedback-section-title">{t('privacy.title')}</h3>
+              <ul className="dsh-feedback-privacy-list">
+                {allFindings.map((finding) => (
+                  <li key={finding.id} className={'dsh-feedback-privacy-' + finding.severity} data-testid="dsh-feedback-privacy-finding">
+                    <span className="dsh-feedback-privacy-severity">{t(('privacy.severity.' + finding.severity) as import('../types.js').FeedbackBridgeKey)}</span>
+                    {t(('privacy.kind.' + finding.kind) as import('../types.js').FeedbackBridgeKey)} — {finding.excerpt}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
           <div className="dsh-feedback-edit-row">
           <form className="dsh-feedback-form" onSubmit={(event) => event.preventDefault()}>
             <label className="dsh-feedback-field" htmlFor="dsh-feedback-title">
@@ -466,6 +726,20 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
               </button>
               <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-discard-keep" onClick={keepEditing}>
                 {t('discard.keep')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {confirmOverwrite !== null ? (
+          <div className="dsh-feedback-confirm" data-testid="dsh-feedback-overwrite-confirm" role="alertdialog" aria-modal="true" aria-label={t('assist.overwriteTitle')}>
+            <p className="dsh-feedback-confirm-title">{t('assist.overwriteTitle')}</p>
+            <p className="dsh-feedback-confirm-body">{t('assist.overwriteBody')}</p>
+            <div className="dsh-feedback-confirm-actions">
+              <button type="button" className="dsh-feedback-action dsh-feedback-action-primary" data-testid="dsh-feedback-overwrite-confirm-action" onClick={() => applySuggestionNow(confirmOverwrite)}>
+                {t('assist.replace')}
+              </button>
+              <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-overwrite-keep" onClick={() => setConfirmOverwrite(null)}>
+                {t('assist.keepEdit')}
               </button>
             </div>
           </div>
