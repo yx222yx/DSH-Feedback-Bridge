@@ -69,7 +69,14 @@ export type FeedbackBridgeKey =
   | 'sources.reason.error'
   | 'sources.reason.tool-error'
   | 'sources.reason.turn-error'
-  | 'sources.reason.session';
+  | 'sources.reason.session'
+  | 'sources.diag.title'
+  | 'sources.diag.cwd'
+  | 'sources.diag.preset'
+  | 'sources.diag.version'
+  | 'sources.diag.session'
+  | 'sources.diag.turnMaxTokens'
+  | 'sources.diag.errorCode';
 
 /** Namespace-bound translate function delivered by the locale service. */
 export type T = TranslateNS<'dsh-feedback-bridge'>;

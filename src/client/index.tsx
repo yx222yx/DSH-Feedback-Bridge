@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ClientContext, ISessions } from '@deepseek-ai/dsh-client-runtime/client';
+import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { NS, OFFICIAL_DISCUSSIONS_URL } from './constants.js';
 import { createConversationSource } from './conversation.js';
 import type { ConversationSource } from './conversation.js';
@@ -56,10 +56,10 @@ export {
 export type {
   ConfirmedSourceRecord,
   FeedbackSourceCandidate,
+  SourceCopy,
   SourceDerivationContext,
   SourceKind,
   SourceRole,
-  SourceStatus,
 } from './sources.js';
 
 /**
@@ -80,11 +80,8 @@ export function apply(ctx: ClientContext): void {
   const sessions = createFeedbackSessionController();
   const persistence = createDraftPersistence({ draftUrl: draftUrl() });
   // The current-conversation read rides the official `ctx.sessions` face;
-  // test compositions without the sessions service degrade to no-session.
-  const sessionsService = (ctx as { sessions?: ISessions }).sessions;
-  const conversation: ConversationSource | null = sessionsService === undefined
-    ? null
-    : createConversationSource(sessionsService);
+  // the `sessions` entry in the inject list above makes it always present.
+  const conversation: ConversationSource = createConversationSource(ctx.sessions);
   ctx.effect(() => {
     const disposers = [
       ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({

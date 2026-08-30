@@ -13,7 +13,6 @@ import type { ConfirmedSourceRecord, FeedbackSourceCandidate } from '../sources.
 import type { ConversationRead, ConversationSource } from '../conversation.js';
 import type {
   DraftPersistence,
-  FeedbackBridgeKey,
   FeedbackDraft,
   FeedbackDraftFields,
   FeedbackFieldKey,
@@ -22,7 +21,8 @@ import type {
   WorkspaceNotice,
 } from '../types.js';
 import { NOTICE_STATUS } from '../types.js';
-import { SourcePanel } from './SourcePanel.js';
+import { ROLE_LABEL_KEYS, SourcePanel } from './SourcePanel.js';
+import type { SourceCopy } from '../sources.js';
 
 /** Debounce window before an edit triggers an autosave, in milliseconds. */
 const AUTOSAVE_DELAY_MS = 600;
@@ -74,6 +74,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   const [confirmDiscard, setConfirmDiscard] = React.useState(false);
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set());
   const [dshVersion, setDshVersion] = React.useState<string | null>(null);
+  const userInteractedRef = React.useRef(false);
   const savedRef = React.useRef<string | null>(null);
   const timerRef = React.useRef<number | null>(null);
   const fieldsRef = React.useRef(fields);
@@ -81,6 +82,15 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   const sourcesRef = React.useRef(sources);
   sourcesRef.current = sources;
   const conversationRead = useConversationRead(conversation);
+  const sourceCopy: SourceCopy = {
+    diagTitle: t('sources.diag.title'),
+    diagCwd: t('sources.diag.cwd'),
+    diagPreset: t('sources.diag.preset'),
+    diagVersion: t('sources.diag.version'),
+    diagSession: t('sources.diag.session'),
+    turnMaxTokens: t('sources.diag.turnMaxTokens'),
+    errorCode: t('sources.diag.errorCode'),
+  };
   const candidates: FeedbackSourceCandidate[] = conversationRead === undefined
     ? []
     : applyRecommendations(deriveSourceCandidates(conversationRead.snapshot, {
@@ -89,6 +99,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
         cwd: conversationRead.meta.cwd,
         agentPreset: conversationRead.meta.agentPreset,
         dshVersion,
+        copy: sourceCopy,
       }));
   const headings = {
     scenario: t('field.scenario'),
@@ -113,6 +124,9 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
     persistence.load()
       .then((persisted) => {
         if (cancelled) return;
+        // A user action before the load settled wins: the restore must not
+        // clobber edits or source changes made in this open workspace.
+        if (userInteractedRef.current) return;
         if (persisted !== null) {
           const resumed: FeedbackDraft = {
             type: 'custom',
@@ -141,7 +155,9 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   }, []);
 
   // Read the host DSH version once for the diagnostics candidate; the
-  // status route is same-origin and never carries draft content.
+  // status route is same-origin and never carries draft content. The fetch
+  // failure is swallowed on purpose: the version is optional diagnostics
+  // copy and the workspace still opens with the remaining candidate content.
   React.useEffect(() => {
     let cancelled = false;
     fetch(statusUrl())
@@ -151,7 +167,9 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
           setDshVersion((data as { dshVersion: string }).dshVersion);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        // Swallows only the best-effort status read; the workspace stays usable.
+      });
     return () => {
       cancelled = true;
     };
@@ -169,8 +187,8 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
 
   /** Confirm a candidate: capture the reviewed snapshot and persist it. */
   const handleConfirm = (candidate: FeedbackSourceCandidate) => {
-    const label = t(('sources.role.' + candidate.role) as FeedbackBridgeKey);
-    const record = confirmSourceCandidate(candidate, new Date().toISOString(), label);
+    userInteractedRef.current = true;
+    const record = confirmSourceCandidate(candidate, new Date().toISOString(), t(ROLE_LABEL_KEYS[candidate.role]));
     const next = [...sourcesRef.current, record];
     setSources(next);
     sessions.setSources(next);
@@ -179,6 +197,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
 
   /** Remove a confirmed source; it immediately stops feeding draft prep. */
   const handleRemove = (id: string) => {
+    userInteractedRef.current = true;
     const next = removeSource(sourcesRef.current, id);
     setSources(next);
     sessions.setSources(next);
@@ -187,6 +206,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
 
   /** Quote a confirmed source's reviewed snapshot into one public field. */
   const handleQuote = (id: string, fieldKey: FeedbackFieldKey) => {
+    userInteractedRef.current = true;
     const record = sourcesRef.current.find((source) => source.id === id);
     if (record === undefined) return;
     const quoted = quoteSourceText(record).trim();
@@ -264,6 +284,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, conversation, onCl
   }, []);
 
   const setField = (key: FeedbackFieldKey) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    userInteractedRef.current = true;
     const value = event.target.value;
     const next = { ...fields, [key]: value };
     setFields(next);

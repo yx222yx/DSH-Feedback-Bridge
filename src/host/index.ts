@@ -356,7 +356,7 @@ function parseDraftWrite(body: unknown): DraftWrite {
     keys.some((key) => !allowed.includes(key))
     || expected.some((key) => !(key in draft) || typeof (draft as Record<string, unknown>)[key] !== 'string')
   ) {
-    throw new Error('draft must contain exactly the five string fields: title, scenario, gap, desired, context');
+    throw new Error('draft must contain exactly the five string fields (title, scenario, gap, desired, context) plus an optional sources array');
   }
   const sources = 'sources' in draft ? validateSources((draft as Record<string, unknown>).sources) : [];
   return { action: 'save', draft: { ...(draft as DraftFields), sources } };

@@ -4,7 +4,7 @@ import { sourcePreview } from '../sources.js';
 import type { FeedbackBridgeKey, FeedbackFieldKey, T } from '../types.js';
 
 /** Locale-owned role label keys for candidate rows and captured records. */
-const ROLE_LABEL_KEYS: Record<SourceRole, FeedbackBridgeKey> = {
+export const ROLE_LABEL_KEYS: Record<SourceRole, FeedbackBridgeKey> = {
   user: 'sources.role.user',
   assistant: 'sources.role.assistant',
   steering: 'sources.role.steering',

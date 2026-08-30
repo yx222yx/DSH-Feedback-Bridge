@@ -14,13 +14,14 @@ export type SourceKind = 'message' | 'tool-result' | 'diagnostic';
 /** Speaker or producer role of one feedback source candidate. */
 export type SourceRole = 'user' | 'assistant' | 'steering' | 'context' | 'tool' | 'error' | 'session';
 
-/** Lifecycle status of one source within the current workspace session. */
-export type SourceStatus = 'candidate' | 'recommended' | 'confirmed' | 'removed';
-
 /** Row preview cap, in characters. */
 export const SOURCE_PREVIEW_CHARS = 400;
 
-/** Byte cap on one confirmed source's captured text snapshot; matches the Host cap. */
+/**
+ * Byte cap on one confirmed source's captured text snapshot. Mirrors the Host
+ * constant MAX_SOURCE_TEXT (src/host/draft-store.ts); the Host is the
+ * authoritative validator at the wire and durable-file boundaries.
+ */
 export const SOURCE_CAPTURE_CAP = 16 * 1024;
 
 /** Maximum candidates the panel lists (newest first, diagnostics included). */
@@ -60,6 +61,22 @@ export interface ConfirmedSourceRecord {
   capturedAt: string;
 }
 
+/**
+ * Locale-owned copy the source model needs when composing candidate text:
+ * the diagnostics block labels and the fixed error sentences. The workspace
+ * builds this from the locale dictionaries, so no plugin-invented string is
+ * hardcoded in the pure module.
+ */
+export interface SourceCopy {
+  diagTitle: string;
+  diagCwd: string;
+  diagPreset: string;
+  diagVersion: string;
+  diagSession: string;
+  turnMaxTokens: string;
+  errorCode: string;
+}
+
 /** Session facts folded into the diagnostics candidate. */
 export interface SourceDerivationContext {
   sessionId: string;
@@ -67,6 +84,8 @@ export interface SourceDerivationContext {
   cwd?: string;
   agentPreset?: string;
   dshVersion?: string | null;
+  /** Locale-owned labels for the diagnostics block and error sentences. */
+  copy: SourceCopy;
 }
 
 /** Small documented keyword set driving the defect-content recommendation. */
@@ -207,7 +226,7 @@ function assistantBlocksText(blocks: readonly AssistantBlock[]): string {
  * @param sessionId - owning session id.
  * @returns the candidate or null.
  */
-function nodeCandidate(node: ConversationSnapshot['nodes'][number], sessionId: string): FeedbackSourceCandidate | null {
+function nodeCandidate(node: ConversationSnapshot['nodes'][number], sessionId: string, copy: SourceCopy): FeedbackSourceCandidate | null {
   let role: SourceRole;
   let kind: SourceKind;
   let itemId: string;
@@ -249,14 +268,14 @@ function nodeCandidate(node: ConversationSnapshot['nodes'][number], sessionId: s
       role = 'error';
       kind = 'diagnostic';
       itemId = 'error:' + node.seq;
-      fullText = node.message + (node.code !== undefined ? '\ncode: ' + node.code : '');
+      fullText = node.message + (node.code !== undefined ? '\n' + copy.errorCode + node.code : '');
       errorSignal = true;
       break;
     case 'turn-max-tokens':
       role = 'error';
       kind = 'diagnostic';
       itemId = 'error:' + node.seq;
-      fullText = 'The turn reached the output token cap.';
+      fullText = copy.turnMaxTokens;
       errorSignal = true;
       break;
     default:
@@ -285,13 +304,14 @@ function nodeCandidate(node: ConversationSnapshot['nodes'][number], sessionId: s
  */
 function sessionDiagnosticsText(context: SourceDerivationContext): string {
   const parts: string[] = [];
-  if (context.title !== undefined && context.title !== '') parts.push('标题：' + context.title);
-  if (context.cwd !== undefined && context.cwd !== '') parts.push('工作目录：' + context.cwd);
-  if (context.agentPreset !== undefined && context.agentPreset !== '') parts.push('Agent 预设：' + context.agentPreset);
+  const copy = context.copy;
+  if (context.title !== undefined && context.title !== '') parts.push(copy.diagTitle + context.title);
+  if (context.cwd !== undefined && context.cwd !== '') parts.push(copy.diagCwd + context.cwd);
+  if (context.agentPreset !== undefined && context.agentPreset !== '') parts.push(copy.diagPreset + context.agentPreset);
   if (context.dshVersion !== undefined && context.dshVersion !== null && context.dshVersion !== '') {
-    parts.push('DSH 版本：' + context.dshVersion);
+    parts.push(copy.diagVersion + context.dshVersion);
   }
-  parts.push('会话 ID：' + context.sessionId);
+  parts.push(copy.diagSession + context.sessionId);
   return parts.join('\n');
 }
 
@@ -314,7 +334,7 @@ export function deriveSourceCandidates(
   if (snapshot.openState !== 'open') return [];
   const messageCandidates: FeedbackSourceCandidate[] = [];
   for (const node of snapshot.nodes) {
-    const candidate = nodeCandidate(node, context.sessionId);
+    const candidate = nodeCandidate(node, context.sessionId, context.copy);
     if (candidate !== null) messageCandidates.push(candidate);
   }
   if (messageCandidates.length === 0) return [];

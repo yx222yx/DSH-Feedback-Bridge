@@ -603,6 +603,8 @@ test('user-approved conversation sources drive the exported draft: sentinel isol
       await sendMessage(page, ta, 'SENTINEL_UNSELECTED 这个需求我已经想清楚了');
       await sendMessage(page, page.locator('textarea').last(), 'SENTINEL_RECOMMENDED 之前的 error 让插件崩了');
       await sendMessage(page, page.locator('textarea').last(), 'SENTINEL_REVIEWED 我遇到了 error 报错：插件无法加载');
+      // Recommended (error keyword) but never confirmed: must never export.
+      await sendMessage(page, page.locator('textarea').last(), 'SENTINEL_RECOMMENDED_ONLY 这个 error 情况也需要关注');
 
       // The failing turn surfaces real diagnostic context in the transcript.
       const errorDeadline = Date.now() + 30_000;
@@ -619,6 +621,7 @@ test('user-approved conversation sources drive the exported draft: sentinel isol
       const panelText = await page.locator('[data-testid="dsh-feedback-sources"]').innerText();
       assert.match(panelText, /SENTINEL_UNSELECTED/);
       assert.match(panelText, /SENTINEL_RECOMMENDED/);
+      assert.match(panelText, /SENTINEL_RECOMMENDED_ONLY/);
       assert.match(panelText, /SENTINEL_REVIEWED/);
       assert.match(panelText, /Recommended/);
       // The failed turn is diagnostic candidate material.
@@ -650,6 +653,7 @@ test('user-approved conversation sources drive the exported draft: sentinel isol
       assert.match(preview, /SENTINEL_REVIEWED/);
       assert.doesNotMatch(preview, /SENTINEL_UNSELECTED/);
       assert.doesNotMatch(preview, /SENTINEL_RECOMMENDED/);
+      assert.doesNotMatch(preview, /SENTINEL_RECOMMENDED_ONLY/);
       assert.doesNotMatch(preview, /MISSING_CREDENTIAL|This turn failed/);
 
       // The exported file carries exactly the reviewed public draft.
@@ -661,6 +665,7 @@ test('user-approved conversation sources drive the exported draft: sentinel isol
       assert.match(exported, /SENTINEL_REVIEWED/);
       assert.doesNotMatch(exported, /SENTINEL_UNSELECTED/);
       assert.doesNotMatch(exported, /SENTINEL_RECOMMENDED/);
+      assert.doesNotMatch(exported, /SENTINEL_RECOMMENDED_ONLY/);
       assert.doesNotMatch(exported, /MISSING_CREDENTIAL|This turn failed/);
 
       // The persisted draft keeps only confirmed sources at schema v2.
@@ -669,6 +674,7 @@ test('user-approved conversation sources drive the exported draft: sentinel isol
       assert.match(persisted, /"version": 2/);
       assert.match(persisted, /SENTINEL_REVIEWED/);
       assert.doesNotMatch(persisted, /SENTINEL_RECOMMENDED/);
+      assert.doesNotMatch(persisted, /SENTINEL_RECOMMENDED_ONLY/);
       assert.doesNotMatch(persisted, /SENTINEL_UNSELECTED/);
 
       await browser.close();

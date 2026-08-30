@@ -23,6 +23,23 @@ function loadClientExports() {
   });
 }
 
+/** Minimal sessions service double for apply() fakes (no current session). */
+function fakeSessions() {
+  return {
+    list: {
+      getSnapshot() {
+        return { ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {} };
+      },
+      subscribe() {
+        return () => {};
+      },
+    },
+    binding() {
+      return undefined;
+    },
+  };
+}
+
 function renderSection(active) {
   const dictionaries = new Map();
   const locale = {
@@ -51,6 +68,7 @@ function renderSection(active) {
   moduleExports.apply({
     locale,
     slots,
+    sessions: fakeSessions(),
     effect(callback) {
       const dispose = callback();
       return () => {
@@ -106,7 +124,7 @@ function renderComponent(Component, props, active) {
     },
   };
   const moduleExports = loadClientExports();
-  moduleExports.apply({ locale, slots, effect(callback) {
+  moduleExports.apply({ locale, slots, sessions: fakeSessions(), effect(callback) {
     const dispose = callback();
     return () => {
       if (typeof dispose === 'function') dispose();

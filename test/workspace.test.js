@@ -467,6 +467,21 @@ test('a persisted draft is restored on open with the restored notice', async () 
   assert.equal(h.sessions.getDraft().title, '已保存标题');
 });
 
+test('a user action before the persisted draft loads is never clobbered by the restore', async () => {
+  const h = setupWorkspace({ persisted: { title: '已保存标题', scenario: '已保存场景', gap: '', desired: '', context: '' } });
+  let vnode = h.render(h.workspace);
+  // Type before the restore load settles: the user's edit must win over the
+  // persisted snapshot that resolves afterwards.
+  findByTestId(vnode, 'dsh-feedback-title').props.onChange({ target: { value: '用户新标题' } });
+  vnode = h.render(h.workspace);
+  await waitTick();
+  vnode = h.render(h.workspace);
+  assert.equal(findByTestId(vnode, 'dsh-feedback-title').props.value, '用户新标题');
+  assert.equal(findByTestId(vnode, 'dsh-feedback-scenario').props.value, '');
+  assert.equal(findByTestId(vnode, 'dsh-feedback-notice'), null);
+  assert.equal(h.sessions.getDraft().title, '用户新标题');
+});
+
 test('a load failure opens a blank workspace with an error notice and the queue keeps working', async () => {
   const h = setupWorkspace({ failLoad: true });
   let vnode = h.render(h.workspace);

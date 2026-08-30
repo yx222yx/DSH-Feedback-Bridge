@@ -104,6 +104,19 @@ test('client plugin declares locale and slots dependencies and registers the set
   const ctx = {
     locale: createFakeLocale('en'),
     slots: createFakeSlots(),
+    sessions: {
+      list: {
+        getSnapshot() {
+          return { ids: [], byId: {}, current: undefined, phase: 'ready', subagentsByParent: {}, jobsBySession: {} };
+        },
+        subscribe() {
+          return () => {};
+        },
+      },
+      binding() {
+        return undefined;
+      },
+    },
     effect(callback) {
       const dispose = callback();
       return () => {

@@ -40,7 +40,9 @@ workflow, and selected evidence stays separate from the public draft.
   in-window nodes to candidate rows (visible text blocks only; reasoning,
   images, and tool-call arguments are excluded) plus one session-diagnostics
   block, newest first, capped at 50. Outside an open window, or with no message
-  material, there are no candidates.
+  material, there are no candidates. The diagnostics labels and the fixed
+  error sentences are locale-owned `SourceCopy` supplied by the workspace's
+  dictionaries; the pure module hardcodes no user-facing copy.
 - **Recommendations are deterministic rules, and are proposals only.**
   `applyRecommendations` flags the session-diagnostics block, the latest
   user/steering message, content matching a small defect-keyword set, and

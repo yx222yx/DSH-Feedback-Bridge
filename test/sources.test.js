@@ -60,6 +60,30 @@ function openSnapshot(nodes) {
   return { nodes, openState: 'open' };
 }
 
+function zhCopy() {
+  return {
+    diagTitle: '标题：',
+    diagCwd: '工作目录：',
+    diagPreset: 'Agent 预设：',
+    diagVersion: 'DSH 版本：',
+    diagSession: '会话 ID：',
+    turnMaxTokens: '该回合达到了输出 token 上限',
+    errorCode: 'code: ',
+  };
+}
+
+function enCopy() {
+  return {
+    diagTitle: 'Title: ',
+    diagCwd: 'Working directory: ',
+    diagPreset: 'Agent preset: ',
+    diagVersion: 'DSH version: ',
+    diagSession: 'Session ID: ',
+    turnMaxTokens: 'The turn reached the output token cap.',
+    errorCode: 'code: ',
+  };
+}
+
 function derivationContext(overrides = {}) {
   return {
     sessionId: 'session-1',
@@ -67,6 +91,7 @@ function derivationContext(overrides = {}) {
     cwd: '/home/user/project',
     agentPreset: 'default',
     dshVersion: '0.1.1-rc.2',
+    copy: zhCopy(),
     ...overrides,
   };
 }
@@ -82,8 +107,9 @@ test('deriveSourceCandidates turns conversation nodes into candidates newest-fir
   assert.equal(candidates.length, 5);
   assert.equal(candidates[0].role, 'session');
   assert.equal(candidates[0].id, 'session-1:session:meta');
-  assert.match(candidates[0].fullText, /我的会话/);
-  assert.match(candidates[0].fullText, /0\.1\.1-rc\.2/);
+  assert.match(candidates[0].fullText, /标题：我的会话/);
+  assert.match(candidates[0].fullText, /DSH 版本：0\.1\.1-rc\.2/);
+  assert.match(candidates[0].fullText, /会话 ID：session-1/);
   assert.equal(candidates[1].role, 'tool');
   assert.equal(candidates[1].id, 'session-1:tool:call-9');
   assert.match(candidates[1].fullText, /SENTINEL_DIAG_RAW/);
@@ -93,6 +119,25 @@ test('deriveSourceCandidates turns conversation nodes into candidates newest-fir
   assert.equal(candidates[3].fullText, '第一条回复');
   assert.equal(candidates[4].role, 'user');
   assert.equal(candidates[4].fullText, '第一条用户消息');
+});
+
+
+
+test('deriveSourceCandidates renders diagnostics and error text with the locale-owned copy', () => {
+  const zh = moduleExports.deriveSourceCandidates(openSnapshot([
+    turnErrorNode(1, 'Provider request failed', { code: 'MISSING_CREDENTIAL' }),
+    { kind: 'turn-max-tokens', seq: 2, time: 2000, turn: 1, step: 1 },
+  ]), derivationContext());
+  const zhError = zh.find((c) => c.itemId === 'error:1');
+  assert.match(zhError.fullText, /Provider request failed/);
+  assert.match(zhError.fullText, /code: MISSING_CREDENTIAL/);
+  assert.equal(zh.find((c) => c.itemId === 'error:2').fullText, '该回合达到了输出 token 上限');
+
+  const en = moduleExports.deriveSourceCandidates(openSnapshot([
+    userNode(1, [textBlock('a message')]),
+  ]), derivationContext({ copy: enCopy() }));
+  assert.match(en[0].fullText, /Title: 我的会话/);
+  assert.match(en[0].fullText, /Session ID: session-1/);
 });
 
 test('deriveSourceCandidates extracts only text blocks and returns no candidates outside an open window', () => {
