@@ -96,6 +96,8 @@ test('SimilarityPanel renders each result with a link, source badge, and matched
   assert.match(html, /Plugin/);
   assert.match(html, /Documentation/);
   assert.match(html, /Matched terms: export, plugin, draft/);
+  // A plugin hit without literal term matches still shows a concise reason (AC2).
+  assert.match(html, /Official @deepseek-ai package/);
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noreferrer"/);
 });

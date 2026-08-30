@@ -99,6 +99,10 @@ function renderDone(t: T, outcome: SimilarityOutcome, onRetry: () => void): Reac
                 <span className="dsh-feedback-similarity-reason" data-testid="dsh-feedback-similarity-reason">
                   {t('similarity.matches')}: {result.matchedTerms.join(', ')}
                 </span>
+              ) : result.source === 'plugin' ? (
+                <span className="dsh-feedback-similarity-reason" data-testid="dsh-feedback-similarity-reason">
+                  {t('similarity.reason.plugin')}
+                </span>
               ) : null}
             </li>
           ))}

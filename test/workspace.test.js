@@ -389,7 +389,7 @@ function waitTick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function setupWorkspace({ manualTimers = false, persisted = null, failSave = false, failRemove = false, failLoad = false, assistTransport = null, conversation = null } = {}) {
+function setupWorkspace({ manualTimers = false, persisted = null, failSave = false, failRemove = false, failLoad = false, assistTransport = null, conversation = null, similarityTransport = null } = {}) {
   const { React, render, reset } = createStatefulReact();
   const { window, state } = createFakeWindow({ manualTimers, persisted, failSave, failRemove, failLoad });
   const moduleExports = loadClientExports(React, window);
@@ -402,9 +402,7 @@ function setupWorkspace({ manualTimers = false, persisted = null, failSave = fal
     sessions,
     persistence,
     assistTransport: assistTransport ?? { run: () => Promise.reject(new Error('no transport')) },
-    similarityTransport: {
-      run: () => Promise.resolve({ status: 'ok', results: [], sourceStates: [] }),
-    },
+    similarityTransport: similarityTransport ?? { run: () => Promise.resolve({ status: 'ok', results: [], sourceStates: [] }) },
     conversation,
     onClose: () => closed.push(true),
   });
@@ -923,4 +921,42 @@ test('the workspace shows the manual submission guidance with the official desti
   const text = collectText(guidance).join('');
   assert.ok(text.includes('人工提交指引'));
   assert.ok(text.includes('官方 DSH Discussions'));
+});
+
+
+test('re-entering an identical intent after clearing it re-runs the similarity check', async () => {
+  let calls = 0;
+  const h = setupWorkspace({
+    manualTimers: true,
+    similarityTransport: {
+      run() {
+        calls += 1;
+        return Promise.resolve({ status: 'ok', results: [], sourceStates: [] });
+      },
+    },
+  });
+  let vnode = h.render(h.workspace);
+  await waitTick();
+  const set = (testid, value) => {
+    findByTestId(vnode, testid).props.onChange({ target: { value } });
+    vnode = h.render(h.workspace);
+  };
+  set('dsh-feedback-scenario', 'export plugin draft');
+  set('dsh-feedback-gap', 'no export path');
+  set('dsh-feedback-desired', 'an export plugin flow');
+  for (const timer of [...h.state.timers.values()]) timer.fn();
+  await waitTick();
+  assert.equal(calls, 1);
+
+  // Clearing any intent field returns the panel to idle (the effect-driven
+  // state update is visible on the next render).
+  set('dsh-feedback-gap', '');
+  vnode = h.render(h.workspace);
+  assert.ok(findByTestId(vnode, 'dsh-feedback-similarity-idle'));
+
+  // …and re-entering the identical intent must run the check again.
+  set('dsh-feedback-gap', 'no export path');
+  for (const timer of [...h.state.timers.values()]) timer.fn();
+  await waitTick();
+  assert.equal(calls, 2);
 });

@@ -147,6 +147,7 @@ export type FeedbackBridgeKey =
   | 'similarity.results'
   | 'similarity.noResults'
   | 'similarity.matches'
+  | 'similarity.reason.plugin'
   | 'similarity.retry'
   | 'similarity.failed'
   | 'similarity.partial'

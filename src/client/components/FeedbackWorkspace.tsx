@@ -238,13 +238,16 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   }, []);
 
   // Run the read-only similarity check once the minimum feedback intent is
-  // present, debounced per edit. An intent change aborts any in-flight check
-  // and a response sequence guard drops stale results, so the panel never
-  // shows results for an intent the user already revised; an unchanged
-  // signature skips a redundant search.
+  // present, debounced per edit. Any intent change supersedes an in-flight
+  // check: the response sequence bumps so a resolving response is dropped
+  // (the panel never shows results for an intent the user already revised),
+  // and clearing the intent forgets the searched signature so re-entering an
+  // identical intent re-checks instead of skipping forever.
   React.useEffect(() => {
     controllerRef.current?.abort();
+    seqRef.current += 1;
     if (intentSignature === null) {
+      searchedRef.current = null;
       setSimilarity({ phase: 'idle' });
       return undefined;
     }
