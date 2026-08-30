@@ -146,6 +146,11 @@ export function parseGrantPayload(payload: unknown): OAuthGrantPayload {
     throw new Error('dsh-feedback-bridge: stored oauth grant expiresAt must be a number');
   }
   if (expiresAt !== undefined) grant.expiresAt = expiresAt;
+  const refreshTokenExpiresAt = record.refreshTokenExpiresAt;
+  if (refreshTokenExpiresAt !== undefined && (typeof refreshTokenExpiresAt !== 'number' || !Number.isFinite(refreshTokenExpiresAt))) {
+    throw new Error('dsh-feedback-bridge: stored oauth grant refreshTokenExpiresAt must be a number');
+  }
+  if (refreshTokenExpiresAt !== undefined) grant.refreshTokenExpiresAt = refreshTokenExpiresAt;
   return grant;
 }
 
@@ -251,7 +256,17 @@ export async function requestDeviceCode(
 export type TokenPollOutcome =
   | { status: 'pending' }
   | { status: 'slow-down' }
-  | { status: 'ok'; accessToken: string; scope: string }
+  | {
+    status: 'ok';
+    accessToken: string;
+    scope: string;
+    /** Present when the OAuth app uses expiring tokens: the refresh grant for automatic renewal. */
+    refreshToken?: string;
+    /** Seconds until the access token expires; absent when GitHub issued no expiry. */
+    expiresInSeconds?: number;
+    /** Seconds until the refresh token expires; absent when unknown. */
+    refreshTokenExpiresInSeconds?: number;
+  }
   | { status: 'failed'; code: 'denied' | 'expired' | 'exchange-failed' | 'network' };
 
 /**
@@ -293,13 +308,29 @@ export async function pollDeviceToken(
   if (!response.ok) {
     return { status: 'failed', code: 'exchange-failed' };
   }
-  const record = payload as { access_token?: unknown; scope?: unknown; error?: unknown };
+  const record = payload as {
+    access_token?: unknown;
+    scope?: unknown;
+    refresh_token?: unknown;
+    expires_in?: unknown;
+    refresh_token_expires_in?: unknown;
+    error?: unknown;
+  };
   if (record.access_token !== undefined) {
     const accessToken = record.access_token;
     if (typeof accessToken !== 'string' || accessToken === '') {
       return { status: 'failed', code: 'exchange-failed' };
     }
-    return { status: 'ok', accessToken, scope: typeof record.scope === 'string' ? record.scope : '' };
+    return {
+      status: 'ok',
+      accessToken,
+      scope: typeof record.scope === 'string' ? record.scope : '',
+      ...(typeof record.refresh_token === 'string' && record.refresh_token !== '' ? { refreshToken: record.refresh_token } : {}),
+      ...(typeof record.expires_in === 'number' && Number.isFinite(record.expires_in) ? { expiresInSeconds: record.expires_in } : {}),
+      ...(typeof record.refresh_token_expires_in === 'number' && Number.isFinite(record.refresh_token_expires_in)
+        ? { refreshTokenExpiresInSeconds: record.refresh_token_expires_in }
+        : {}),
+    };
   }
   switch (record.error) {
     case 'authorization_pending':
@@ -314,6 +345,91 @@ export async function pollDeviceToken(
       return { status: 'failed', code: 'exchange-failed' };
   }
 }
+
+/** Outcome of one refresh-token exchange against GitHub's token endpoint. */
+export type RefreshTokenOutcome =
+  | { status: 'ok'; accessToken: string; scope?: string; refreshToken?: string; expiresInSeconds?: number; refreshTokenExpiresInSeconds?: number }
+  | { status: 'failed'; code: 'authorization-expired' | 'exchange-failed' | 'network' };
+
+
+/**
+ * Exchange a stored refresh token for a fresh access token (GitHub OAuth app
+ * refresh grant). GitHub rotates the refresh token in the response, and the
+ * new token keeps the previous scopes. No client secret is sent: tokens
+ * generated via the device flow do not require one, and the plugin never
+ * holds a secret. A determinate GitHub rejection (bad_refresh_token,
+ * expired_token, revoked, access_denied) means the grant can no longer be
+ * renewed and the user must authorize again.
+ *
+ * @param deps - the injected fetch seam.
+ * @param config - oauth config.
+ * @param refreshToken - the stored refresh token.
+ * @returns the renewed token fields or an explicit failure.
+ */
+export async function refreshAccessToken(
+  deps: { fetchImpl: GitHubDeps['fetchImpl'] },
+  config: GitHubOAuthConfig,
+  refreshToken: string,
+): Promise<RefreshTokenOutcome> {
+  const body = new URLSearchParams({
+    client_id: config.clientId,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+  });
+  let response: Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
+  try {
+    response = await deps.fetchImpl(config.tokenEndpoint, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  } catch {
+    return { status: 'failed', code: 'network' };
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return { status: 'failed', code: response.ok ? 'exchange-failed' : 'network' };
+  }
+  if (!response.ok) {
+    return { status: 'failed', code: 'exchange-failed' };
+  }
+  const record = payload as {
+    access_token?: unknown;
+    scope?: unknown;
+    refresh_token?: unknown;
+    expires_in?: unknown;
+    refresh_token_expires_in?: unknown;
+    error?: unknown;
+  };
+  if (record.access_token !== undefined) {
+    const accessToken = record.access_token;
+    if (typeof accessToken !== 'string' || accessToken === '') {
+      return { status: 'failed', code: 'exchange-failed' };
+    }
+    return {
+      status: 'ok',
+      accessToken,
+      ...(typeof record.scope === 'string' ? { scope: record.scope } : {}),
+      ...(typeof record.refresh_token === 'string' && record.refresh_token !== '' ? { refreshToken: record.refresh_token } : {}),
+      ...(typeof record.expires_in === 'number' && Number.isFinite(record.expires_in) ? { expiresInSeconds: record.expires_in } : {}),
+      ...(typeof record.refresh_token_expires_in === 'number' && Number.isFinite(record.refresh_token_expires_in)
+        ? { refreshTokenExpiresInSeconds: record.refresh_token_expires_in }
+        : {}),
+    };
+  }
+  switch (record.error) {
+    case 'bad_refresh_token':
+    case 'expired_token':
+    case 'revoked':
+    case 'access_denied':
+      return { status: 'failed', code: 'authorization-expired' };
+    default:
+      return { status: 'failed', code: 'exchange-failed' };
+  }
+}
+
 
 /**
  * Whether every requested scope is present in the granted space-separated set.
@@ -379,13 +495,66 @@ function oauthMutationHttpCode(status: number): GitHubSubmissionFailureCode {
 /** Resolve the stored grant into a usable token, or an explicit authorization failure. */
 type UsableGrant =
   | { kind: 'grant'; grant: OAuthGrantPayload }
-  | { kind: 'failed'; code: 'authorization-required' | 'authorization-expired' };
+  | { kind: 'failed'; code: 'authorization-required' | 'authorization-expired' | 'network' };
 
-async function usableGrant(grantStore: GitHubGrantStore): Promise<UsableGrant> {
+/**
+ * Renew a stored grant through GitHub's refresh-token grant. On a determinate
+ * refresh-token rejection the grant is provably dead, so it is cleared from
+ * the credentials service and the user must authorize again; a transient
+ * failure keeps the grant and surfaces the network failure instead.
+ *
+ * @param grantStore - the grant store.
+ * @param oauth - resolved oauth config.
+ * @param deps - the fetch seam.
+ * @param grant - the current stored grant (must carry a refresh token).
+ * @returns the renewed grant or an explicit failure code.
+ */
+async function refreshStoredGrant(
+  grantStore: GitHubGrantStore,
+  oauth: GitHubOAuthConfig,
+  deps: { fetchImpl: GitHubDeps['fetchImpl'] },
+  grant: OAuthGrantPayload,
+): Promise<{ status: 'ok'; grant: OAuthGrantPayload } | { status: 'failed'; code: 'authorization-expired' | 'network' }> {
+  if (grant.refreshToken === undefined) {
+    return { status: 'failed', code: 'authorization-expired' };
+  }
+  const outcome = await refreshAccessToken({ fetchImpl: deps.fetchImpl }, oauth, grant.refreshToken);
+  if (outcome.status === 'failed') {
+    if (outcome.code === 'authorization-expired') {
+      await grantStore.clearGrant();
+    }
+    return { status: 'failed', code: outcome.code === 'authorization-expired' ? 'authorization-expired' : 'network' };
+  }
+  const renewed: OAuthGrantPayload = {
+    accessToken: outcome.accessToken,
+    login: grant.login,
+    scopes: outcome.scope ?? grant.scopes,
+    ...(outcome.refreshToken !== undefined
+      ? { refreshToken: outcome.refreshToken }
+      : grant.refreshToken !== undefined ? { refreshToken: grant.refreshToken } : {}),
+    ...(outcome.expiresInSeconds !== undefined ? { expiresAt: Date.now() + outcome.expiresInSeconds * 1000 } : {}),
+    ...(outcome.refreshTokenExpiresInSeconds !== undefined
+      ? { refreshTokenExpiresAt: Date.now() + outcome.refreshTokenExpiresInSeconds * 1000 }
+      : {}),
+  };
+  await grantStore.writeGrant(renewed);
+  return { status: 'ok', grant: renewed };
+}
+
+async function usableGrant(
+  grantStore: GitHubGrantStore,
+  oauth: GitHubOAuthConfig,
+  deps: { fetchImpl: GitHubDeps['fetchImpl'] },
+): Promise<UsableGrant> {
   const grant = await grantStore.readGrant();
   if (grant === undefined) return { kind: 'failed', code: 'authorization-required' };
   if (grant.expiresAt !== undefined && grant.expiresAt <= Date.now()) {
-    return { kind: 'failed', code: 'authorization-expired' };
+    if (grant.refreshToken === undefined) {
+      return { kind: 'failed', code: 'authorization-expired' };
+    }
+    const renewed = await refreshStoredGrant(grantStore, oauth, deps, grant);
+    if (renewed.status === 'ok') return { kind: 'grant', grant: renewed.grant };
+    return { kind: 'failed', code: renewed.code };
   }
   return { kind: 'grant', grant };
 }
@@ -414,22 +583,42 @@ export function createOAuthGitHubService(
   };
   return {
     async prepare(_options) {
-      const usable = await usableGrant(deps.grantStore);
+      let usable = await usableGrant(deps.grantStore, oauth, deps);
       if (usable.kind !== 'grant') {
         return { status: 'failed', code: usable.code };
       }
-      let response: Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
-      try {
-        response = await deps.fetchImpl(github.graphqlEndpoint, authInit(JSON.stringify({
-          query: PREPARE_QUERY,
-          variables: { owner: OFFICIAL_DISCUSSION_OWNER, name: OFFICIAL_DISCUSSION_REPO },
-        }), usable.grant.accessToken));
-      } catch (error) {
-        if (error instanceof GitHubReadError) {
-          return { status: 'failed', code: error.code };
+      let accessToken = usable.grant.accessToken;
+      const dispatch = async (): Promise<{ response?: Awaited<ReturnType<GitHubDeps['fetchImpl']>>; failed?: GitHubSubmissionFailureCode }> => {
+        try {
+          return { response: await deps.fetchImpl(github.graphqlEndpoint, authInit(JSON.stringify({
+            query: PREPARE_QUERY,
+            variables: { owner: OFFICIAL_DISCUSSION_OWNER, name: OFFICIAL_DISCUSSION_REPO },
+          }), accessToken)) };
+        } catch (error) {
+          if (error instanceof GitHubReadError) {
+            return { failed: error.code };
+          }
+          return { failed: 'network' };
         }
-        return { status: 'failed', code: 'network' };
+      };
+      let result = await dispatch();
+      // A 401 means the stored token was rejected server-side: renew through
+      // the refresh grant (when present) and retry once. A 401 is a determinate
+      // pre-execution rejection, so retrying cannot duplicate anything.
+      if (result.response?.status === 401 && usable.grant.refreshToken !== undefined) {
+        const renewed = await refreshStoredGrant(deps.grantStore, oauth, deps, usable.grant);
+        if (renewed.status === 'ok') {
+          usable = { kind: 'grant', grant: renewed.grant };
+          accessToken = renewed.grant.accessToken;
+          result = await dispatch();
+        } else {
+          return { status: 'failed', code: renewed.code };
+        }
       }
+      if (result.failed !== undefined) {
+        return { status: 'failed', code: result.failed };
+      }
+      const response = result.response as Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
       if (!response.ok) {
         return { status: 'failed', code: oauthReadHttpCode(response.status) };
       }
@@ -469,31 +658,54 @@ export function createOAuthGitHubService(
       };
     },
     async createDiscussion(input) {
-      const usable = await usableGrant(deps.grantStore);
+      let usable = await usableGrant(deps.grantStore, oauth, deps);
       if (usable.kind !== 'grant') {
         return { status: 'failed', code: usable.code };
       }
-      let response: Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
-      try {
-        response = await deps.fetchImpl(github.graphqlEndpoint, authInit(JSON.stringify({
-          query: CREATE_DISCUSSION_MUTATION,
-          variables: {
-            input: {
-              repositoryId: input.repositoryId,
-              categoryId: input.categoryId,
-              title: input.title,
-              body: input.body,
+      let accessToken = usable.grant.accessToken;
+      const dispatch = async (): Promise<{ response?: Awaited<ReturnType<GitHubDeps['fetchImpl']>>; unknown?: true; failed?: GitHubSubmissionFailureCode }> => {
+        try {
+          return { response: await deps.fetchImpl(github.graphqlEndpoint, authInit(JSON.stringify({
+            query: CREATE_DISCUSSION_MUTATION,
+            variables: {
+              input: {
+                repositoryId: input.repositoryId,
+                categoryId: input.categoryId,
+                title: input.title,
+                body: input.body,
+              },
             },
-          },
-        }), usable.grant.accessToken));
-      } catch (error) {
-        // The request was dispatched: a timeout or abort means GitHub may have
-        // processed it, so the result is unknown and must never be retried.
-        if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-          return { status: 'unknown' };
+          }), accessToken)) };
+        } catch (error) {
+          // The request was dispatched: a timeout or abort means GitHub may have
+          // processed it, so the result is unknown and must never be retried.
+          if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+            return { unknown: true };
+          }
+          return { failed: 'network' };
         }
-        return { status: 'failed', code: 'network' };
+      };
+      let result = await dispatch();
+      // A 401 is a determinate pre-execution rejection (the mutation never
+      // ran), so renewing through the refresh grant and dispatching once more
+      // cannot create a duplicate; unknown results are never retried.
+      if (result.response?.status === 401 && usable.grant.refreshToken !== undefined) {
+        const renewed = await refreshStoredGrant(deps.grantStore, oauth, deps, usable.grant);
+        if (renewed.status === 'ok') {
+          usable = { kind: 'grant', grant: renewed.grant };
+          accessToken = renewed.grant.accessToken;
+          result = await dispatch();
+        } else {
+          return { status: 'failed', code: renewed.code };
+        }
       }
+      if (result.unknown === true) {
+        return { status: 'unknown' };
+      }
+      if (result.failed !== undefined) {
+        return { status: 'failed', code: result.failed };
+      }
+      const response = result.response as Awaited<ReturnType<GitHubDeps['fetchImpl']>>;
       let payload: unknown;
       try {
         payload = await response.json();
@@ -611,6 +823,11 @@ export function createOAuthFlowManager(
       accessToken: outcome.accessToken,
       login: identity.login,
       scopes: outcome.scope,
+      ...(outcome.refreshToken !== undefined ? { refreshToken: outcome.refreshToken } : {}),
+      ...(outcome.expiresInSeconds !== undefined ? { expiresAt: Date.now() + outcome.expiresInSeconds * 1000 } : {}),
+      ...(outcome.refreshTokenExpiresInSeconds !== undefined
+        ? { refreshTokenExpiresAt: Date.now() + outcome.refreshTokenExpiresInSeconds * 1000 }
+        : {}),
     };
     await deps.grantStore.writeGrant(grant);
     settle({ phase: 'authorized', login: identity.login });

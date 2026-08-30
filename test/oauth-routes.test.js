@@ -132,7 +132,7 @@ function tempHome() {
 }
 
 /** Local fake Device Flow + GitHub server; the token endpoint follows a script. */
-async function startFakeServer({ tokenScript } = {}) {
+async function startFakeServer({ tokenScript, refreshTokenScript } = {}) {
   const { createServer } = await import('node:http');
   const requests = [];
   let tokenCalls = 0;
@@ -158,6 +158,12 @@ async function startFakeServer({ tokenScript } = {}) {
       if (req.url?.startsWith('/token')) {
         tokenCalls += 1;
         const params = new URLSearchParams(body);
+        if (params.get('grant_type') === 'refresh_token') {
+          const answer = refreshTokenScript ? refreshTokenScript(tokenCalls) : { error: 'bad_refresh_token' };
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(answer));
+          return;
+        }
         assert.equal(params.get('device_code'), FAKE_DEVICE_CODE);
         assert.equal(params.get('grant_type'), 'urn:ietf:params:oauth:grant-type:device_code');
         assert.equal(params.get('client_secret'), null);
@@ -467,3 +473,72 @@ test('the dual provider requires an explicit auth choice, then honors both the g
     rmSync(shimDir, { recursive: true, force: true });
   }
 });
+
+test('an expired device-flow grant is renewed automatically through the refresh token before submission', async () => {
+  const fake = await startFakeServer({
+    tokenScript: (n) => (n === 1 ? { error: 'authorization_pending' } : {
+      access_token: FAKE_TOKEN,
+      scope: 'public_repo',
+      refresh_token: 'ghr_route-refresh',
+      expires_in: 28800,
+      refresh_token_expires_in: 15897600,
+    }),
+    refreshTokenScript: () => ({
+      access_token: 'gho_route-renewed',
+      scope: 'public_repo',
+      refresh_token: 'ghr_route-rotated',
+      expires_in: 28800,
+    }),
+  });
+  const home = tempHome();
+  try {
+    const { harness, fiber, restore } = await loadOauth(home, oauthConfig(fake.base));
+    try {
+      const statusRoute = harness.routes.get('/dsh-feedback-bridge/oauth/status');
+      const startRoute = harness.routes.get('/dsh-feedback-bridge/oauth/start');
+      const submissionRoute = harness.routes.get('/dsh-feedback-bridge/submission');
+
+      // Authorize: the stored grant carries the refresh token and both expiries.
+      await startRoute.handler(createRequest({ method: 'POST', url: '/dsh-feedback-bridge/oauth/start' }), createResponse());
+      const terminal = await waitForTerminal(statusRoute);
+      assert.equal(terminal.status, 'authorized');
+      const stored = harness.credentials.record().payload;
+      assert.equal(stored.refreshToken, 'ghr_route-refresh');
+      assert.ok(stored.expiresAt > Date.now());
+      assert.ok(stored.refreshTokenExpiresAt > Date.now());
+
+      // Simulate the access token expiring while the grant stays stored.
+      stored.expiresAt = Date.now() - 1000;
+
+      // Prepare renews the grant first, then answers with the fresh token.
+      const prepare = createResponse();
+      await submissionRoute.handler(createRequest({ method: 'GET', url: '/dsh-feedback-bridge/submission' }), prepare);
+      const prepared = JSON.parse(prepare.body);
+      assert.equal(prepared.status, 'ready');
+      const refreshRequest = fake.requests.find((request) => request.url?.startsWith('/token') && request.body.includes('grant_type=refresh_token'));
+      assert.ok(refreshRequest, 'the expired grant must be renewed before preparing');
+      const renewed = harness.credentials.record().payload;
+      assert.equal(renewed.accessToken, 'gho_route-renewed');
+      assert.equal(renewed.refreshToken, 'ghr_route-rotated');
+
+      // The single mutation runs with the renewed token.
+      const confirm = createResponse();
+      await submissionRoute.handler(createRequest({
+        method: 'POST',
+        url: '/dsh-feedback-bridge/submission',
+        body: JSON.stringify({ preparedId: prepared.preparedId, title: 't', body: 'b', categoryId: 'DIC_ideas' }),
+      }), confirm);
+      assert.equal(JSON.parse(confirm.body).status, 'created');
+      const mutations = fake.requests.filter((request) => request.url?.startsWith('/graphql') && /mutation\s+CreateDiscussion/.test(request.body));
+      assert.equal(mutations.length, 1, 'exactly one mutation per confirmation');
+      assert.equal(mutations[0].headers.authorization, 'Bearer gho_route-renewed', 'the mutation must run with the renewed token');
+    } finally {
+      restore();
+      await fiber.dispose().catch(() => {});
+      rmSync(home, { recursive: true, force: true });
+    }
+  } finally {
+    fake.server.close();
+  }
+});
+

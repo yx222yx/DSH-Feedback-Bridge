@@ -77,6 +77,17 @@ a distributed client secret.
   `src/host/index.ts` drops the callback route; `/oauth/start` returns
   `{verificationUri, userCode}`. The oauth submission provider is unchanged
   apart from the config shape.
+- **Token renewal.** GitHub OAuth app access tokens are short-lived (typically
+  ~8 hours); the device token response may carry `refresh_token`,
+  `expires_in`, and `refresh_token_expires_in`. When present, the grant
+  persists them and the submission provider renews the access token through
+  GitHub's refresh grant before dispatch, and again once after a server-side
+  401 (a determinate pre-execution rejection, so retrying cannot duplicate a
+  mutation; unknown results stay unretried). A refresh-token rejection clears
+  the grant and returns the user to the sign-in step with a distinct
+  authorization-expired state instead of an unexplained submission failure.
+  Grants stored without expiry or refresh fields (and GitHub CLI tokens) keep
+  the earlier behavior: a 401 surfaces authorization-expired.
 - Client transport, the authorizing panel phase (user code + copy + official
   link + cancel), the failure copy (denied/expired/insufficient-scope/
   exchange-failed/network), and the credentials-provider disclosure are all in

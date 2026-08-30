@@ -30,8 +30,12 @@ export interface GhCli {
 /** The stored GitHub OAuth grant the submission provider reads back from the credentials service. */
 export interface OAuthGrantPayload {
   accessToken: string;
+  /** The refresh token GitHub issued (when the app uses expiring tokens); enables renewal without re-login. */
   refreshToken?: string;
+  /** Epoch ms at which the access token expires; absent when GitHub issued no expiry. */
   expiresAt?: number;
+  /** Epoch ms at which the refresh token itself expires; absent when unknown. */
+  refreshTokenExpiresAt?: number;
   login: string;
   scopes: string;
 }

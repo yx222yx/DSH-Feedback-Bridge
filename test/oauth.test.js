@@ -7,6 +7,7 @@ import {
   normalizeOAuthConfig,
   parseGrantPayload,
   pollDeviceToken,
+  refreshAccessToken,
   requestDeviceCode,
 } from '../lib/oauth.js';
 import { OFFICIAL_DISCUSSION_OWNER, OFFICIAL_DISCUSSION_REPO } from '../lib/github.js';
@@ -129,6 +130,72 @@ test('pollDeviceToken posts the device code with the device grant type and maps 
   assert.deepEqual(await pollDeviceToken({ fetchImpl: networkFail.impl }, config, 'device-secret'), { status: 'failed', code: 'network' });
   const malformed = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({}) });
   assert.deepEqual(await pollDeviceToken({ fetchImpl: malformed.impl }, config, 'device-secret'), { status: 'failed', code: 'exchange-failed' });
+});
+
+test('pollDeviceToken parses refresh_token, expires_in, and refresh_token_expires_in when GitHub returns them', async () => {
+  const config = baseConfig();
+  const withRefresh = fakeFetch({
+    [config.tokenEndpoint]: () => jsonResponse({
+      access_token: 'gho_poll-refresh',
+      scope: 'public_repo',
+      refresh_token: 'ghr_poll',
+      expires_in: 28800,
+      refresh_token_expires_in: 15897600,
+    }),
+  });
+  assert.deepEqual(
+    await pollDeviceToken({ fetchImpl: withRefresh.impl }, config, 'device-secret'),
+    {
+      status: 'ok',
+      accessToken: 'gho_poll-refresh',
+      scope: 'public_repo',
+      refreshToken: 'ghr_poll',
+      expiresInSeconds: 28800,
+      refreshTokenExpiresInSeconds: 15897600,
+    },
+  );
+  // Without the refresh fields the ok outcome carries none of them.
+  const plain = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({ access_token: 'gho_plain', scope: 'public_repo' }) });
+  assert.deepEqual(
+    await pollDeviceToken({ fetchImpl: plain.impl }, config, 'device-secret'),
+    { status: 'ok', accessToken: 'gho_plain', scope: 'public_repo' },
+  );
+});
+
+test('refreshAccessToken exchanges the refresh token with the refresh grant and parses the rotated tokens', async () => {
+  const config = baseConfig();
+  const fetch = fakeFetch({
+    [config.tokenEndpoint]: () => jsonResponse({
+      access_token: 'gho_refreshed',
+      scope: 'public_repo',
+      refresh_token: 'ghr_rotated',
+      expires_in: 28800,
+      refresh_token_expires_in: 15897600,
+    }),
+  });
+  assert.deepEqual(
+    await refreshAccessToken({ fetchImpl: fetch.impl }, config, 'ghr_old'),
+    { status: 'ok', accessToken: 'gho_refreshed', scope: 'public_repo', refreshToken: 'ghr_rotated', expiresInSeconds: 28800, refreshTokenExpiresInSeconds: 15897600 },
+  );
+  const body = new URLSearchParams(fetch.calls[0].body);
+  assert.equal(body.get('client_id'), 'client-device');
+  assert.equal(body.get('grant_type'), 'refresh_token');
+  assert.equal(body.get('refresh_token'), 'ghr_old');
+  assert.equal(body.get('client_secret'), null, 'device-flow tokens never require a client secret');
+});
+
+test('refreshAccessToken maps determinate GitHub rejections to authorization-expired and other failures distinctly', async () => {
+  const config = baseConfig();
+  for (const error of ['bad_refresh_token', 'expired_token', 'revoked', 'access_denied']) {
+    const fetch = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({ error }) });
+    assert.deepEqual(await refreshAccessToken({ fetchImpl: fetch.impl }, config, 'ghr_x'), { status: 'failed', code: 'authorization-expired' }, error);
+  }
+  const malformed = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({ error: 'unsupported_grant_type' }) });
+  assert.deepEqual(await refreshAccessToken({ fetchImpl: malformed.impl }, config, 'ghr_x'), { status: 'failed', code: 'exchange-failed' });
+  const empty = fakeFetch({ [config.tokenEndpoint]: () => jsonResponse({}) });
+  assert.deepEqual(await refreshAccessToken({ fetchImpl: empty.impl }, config, 'ghr_x'), { status: 'failed', code: 'exchange-failed' });
+  const network = fakeFetch({});
+  assert.deepEqual(await refreshAccessToken({ fetchImpl: network.impl }, config, 'ghr_x'), { status: 'failed', code: 'network' });
 });
 
 test('hasGrantedScope requires every requested scope in the granted set', () => {
@@ -256,6 +323,26 @@ test('the flow manager polls until authorization and commits the grant with the 
   assert.equal(store.grant().accessToken, 'gho_manager-secret');
   assert.ok(!JSON.stringify(manager.status()).includes('gho_manager-secret'), 'the token must never appear in the status');
   assert.ok(fetch.calls.some((call) => call.url.endsWith('/token')), 'the host must poll the token endpoint');
+});
+
+test('the flow manager persists the refresh token and both expiries when GitHub returns them', async () => {
+  const store = fakeGrantStore();
+  const { config, fetch } = fakeDeviceOAuth({ tokenScript: () => ({
+    access_token: 'gho_expiring',
+    scope: 'public_repo',
+    refresh_token: 'ghr_flow',
+    expires_in: 28800,
+    refresh_token_expires_in: 15897600,
+  }) });
+  const manager = createOAuthFlowManager(config, { fetchImpl: fetch.impl, grantStore: store });
+  await manager.start();
+  const terminal = await awaitTerminal(manager);
+  assert.deepEqual(terminal, { phase: 'authorized', login: 'alice' });
+  const grant = store.grant();
+  assert.equal(grant.refreshToken, 'ghr_flow');
+  assert.ok(grant.expiresAt !== undefined && grant.expiresAt > Date.now(), 'the access-token expiry must be persisted');
+  assert.ok(grant.refreshTokenExpiresAt !== undefined && grant.refreshTokenExpiresAt > Date.now(), 'the refresh-token expiry must be persisted');
+  assert.ok(!JSON.stringify(manager.status()).includes('ghr_flow'), 'the refresh token must never reach the Client-visible status');
 });
 
 test('the flow manager handles slow_down by slowing down and still succeeding', async () => {
@@ -400,6 +487,152 @@ test('oauth provider maps an expired grant and an expired token to authorization
     title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
   });
   assert.deepEqual(outcome, { status: 'failed', code: 'authorization-expired' });
+});
+
+/** Fetch seam routing token refreshes to a scripted token endpoint and everything else to the graphql fake. */
+function refreshAwareFetch(tokenScript, graphql) {
+  const calls = [];
+  return {
+    calls,
+    impl(url, init) {
+      calls.push({ url: String(url), body: String(init?.body ?? ''), headers: { ...(init?.headers ?? {}) } });
+      if (String(url).endsWith('/token')) {
+        return Promise.resolve(jsonResponse(tokenScript()));
+      }
+      return graphql.impl(url, init);
+    },
+  };
+}
+
+function oauthService(store, fetch, tokenEndpoint) {
+  return createOAuthGitHubService(
+    { graphqlEndpoint: 'http://127.0.0.1:9/graphql', timeoutMs: 1000, auth: { provider: 'oauth' } },
+    baseConfig({ tokenEndpoint }),
+    { grantStore: store, fetchImpl: fetch },
+  );
+}
+
+test('oauth provider renews an expired grant through the refresh grant before preparing', async () => {
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, refreshToken: 'ghr_stored', expiresAt: Date.now() - 1000 });
+  const tokenCalls = [];
+  const graphql = fakeGitHubFetch();
+  const fetch = refreshAwareFetch(() => {
+    tokenCalls.push(new URLSearchParams(''));
+    return { access_token: 'gho_renewed', scope: 'public_repo', refresh_token: 'ghr_rotated', expires_in: 28800 };
+  }, graphql);
+  const service = oauthService(store, fetch.impl, 'http://127.0.0.1:9/token');
+  const result = await service.prepare();
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') return;
+  assert.equal(tokenCalls.length, 1, 'the expired grant must be renewed once');
+  const refreshBody = fetch.calls.find((call) => call.url.endsWith('/token'));
+  assert.equal(new URLSearchParams(refreshBody.body).get('grant_type'), 'refresh_token');
+  assert.equal(new URLSearchParams(refreshBody.body).get('refresh_token'), 'ghr_stored');
+  assert.equal(store.grant().accessToken, 'gho_renewed', 'the renewed grant must be persisted');
+  assert.equal(store.grant().refreshToken, 'ghr_rotated', 'the rotated refresh token must be persisted');
+  assert.equal(graphql.calls[0].headers.authorization, 'Bearer gho_renewed', 'the prepare must run with the renewed token');
+});
+
+test('oauth provider clears the grant and reports authorization-expired when the refresh token is rejected', async () => {
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, refreshToken: 'ghr_dead', expiresAt: Date.now() - 1000 });
+  const graphql = fakeGitHubFetch();
+  const fetch = refreshAwareFetch(() => ({ error: 'bad_refresh_token' }), graphql);
+  const service = oauthService(store, fetch.impl, 'http://127.0.0.1:9/token');
+  assert.deepEqual(await service.prepare(), { status: 'failed', code: 'authorization-expired' });
+  assert.equal(store.grant(), undefined, 'a provably dead grant must be cleared so the user re-authorizes');
+  assert.equal(graphql.calls.length, 0, 'no submission request may run with a dead grant');
+});
+
+test('oauth provider renews on a server-side 401 and retries the read-only prepare once', async () => {
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, refreshToken: 'ghr_stored' });
+  let tokenCalls = 0;
+  let graphqlCalls = 0;
+  const graphql = {
+    impl(url, init) {
+      graphqlCalls += 1;
+      if (graphqlCalls === 1) return Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { repository: { id: 'R', discussionCategories: { nodes: [{ id: 'DIC_i', name: 'Ideas' }] } } } }),
+      });
+    },
+  };
+  const fetch = refreshAwareFetch(() => {
+    tokenCalls += 1;
+    return { access_token: 'gho_renewed-401', scope: 'public_repo', refresh_token: 'ghr_rotated-401', expires_in: 28800 };
+  }, graphql);
+  const service = oauthService(store, fetch.impl, 'http://127.0.0.1:9/token');
+  const result = await service.prepare();
+  assert.equal(result.status, 'ready');
+  assert.equal(tokenCalls, 1, 'a 401 must trigger exactly one renewal');
+  assert.equal(graphqlCalls, 2, 'the rejected prepare must be retried once with the renewed token');
+  assert.equal(store.grant().accessToken, 'gho_renewed-401');
+  const graphqlHeaders = fetch.calls.filter((call) => call.url.endsWith('/graphql')).map((call) => call.headers.authorization);
+  assert.deepEqual(graphqlHeaders, ['Bearer gho_oauth-secret', 'Bearer gho_renewed-401']);
+});
+
+test('oauth provider renews on a 401 mutation rejection and dispatches once more without duplication', async () => {
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, refreshToken: 'ghr_stored' });
+  let tokenCalls = 0;
+  let mutationCalls = 0;
+  const graphql = {
+    impl(url, init) {
+      if (/mutation\s+CreateDiscussion/.test(String(init?.body ?? ''))) {
+        mutationCalls += 1;
+        if (mutationCalls === 1) return Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: { createDiscussion: { discussion: { url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/42' } } } }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: { repository: { id: 'R', discussionCategories: { nodes: [] } } } }) });
+    },
+  };
+  const fetch = refreshAwareFetch(() => {
+    tokenCalls += 1;
+    return { access_token: 'gho_renewed-mut', scope: 'public_repo', refresh_token: 'ghr_rotated-mut', expires_in: 28800 };
+  }, graphql);
+  const service = oauthService(store, fetch.impl, 'http://127.0.0.1:9/token');
+  const outcome = await service.createDiscussion({
+    title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
+  });
+  assert.deepEqual(outcome, { status: 'created', url: 'https://github.com/deepseek-ai/deepseek-harness/discussions/42' });
+  assert.equal(tokenCalls, 1, 'a 401 must trigger exactly one renewal');
+  assert.equal(mutationCalls, 2, 'one rejected attempt plus one renewed dispatch');
+  assert.equal(store.grant().accessToken, 'gho_renewed-mut');
+  const mutationHeaders = fetch.calls.filter((call) => call.url.endsWith('/graphql') && /mutation/.test(call.body)).map((call) => call.headers.authorization);
+  assert.deepEqual(mutationHeaders, ['Bearer gho_oauth-secret', 'Bearer gho_renewed-mut']);
+});
+
+test('oauth provider never retries a mutation when the renewal itself is rejected', async () => {
+  const store = fakeGrantStore();
+  await store.writeGrant({ ...VALID_GRANT, refreshToken: 'ghr_dead' });
+  let mutationCalls = 0;
+  const graphql = {
+    impl(url, init) {
+      if (/mutation\s+CreateDiscussion/.test(String(init?.body ?? ''))) {
+        mutationCalls += 1;
+        return Promise.resolve({ ok: false, status: 401, json: async () => ({}) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: { repository: { id: 'R', discussionCategories: { nodes: [] } } } }) });
+    },
+  };
+  const fetch = refreshAwareFetch(() => ({ error: 'bad_refresh_token' }), graphql);
+  const service = oauthService(store, fetch.impl, 'http://127.0.0.1:9/token');
+  const outcome = await service.createDiscussion({
+    title: 't', body: 'b', categoryId: 'c', repositoryId: 'r', identity: { login: 'alice' },
+  });
+  assert.deepEqual(outcome, { status: 'failed', code: 'authorization-expired' });
+  assert.equal(mutationCalls, 1, 'a mutation may be dispatched at most once');
+  assert.equal(store.grant(), undefined, 'the dead grant must be cleared');
+});
+
+test('parseGrantPayload accepts the optional refresh fields and rejects a malformed refreshTokenExpiresAt', () => {
+  const grant = { accessToken: 'x', login: 'a', scopes: 's', refreshToken: 'ghr', expiresAt: 1, refreshTokenExpiresAt: 2 };
+  assert.deepEqual(parseGrantPayload(grant), grant);
+  assert.throws(() => parseGrantPayload({ ...grant, refreshTokenExpiresAt: 'soon' }), /refreshTokenExpiresAt/);
 });
 
 // ---------------------------------------------------------------------------
