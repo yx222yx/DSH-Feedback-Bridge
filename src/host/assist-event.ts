@@ -1,6 +1,7 @@
 import type { SessionEventMap } from '@deepseek-ai/dsh-session';
 import type { FeedbackType } from './draft-store.js';
-import { INSTRUCTION_VERSION, type AssistInput, type AssistLanguage, type AssistOutcome } from './assist.js';
+import type { DraftLanguage } from './feedback-types.js';
+import { INSTRUCTION_VERSION, type AssistInput, type AssistOutcome } from './assist.js';
 
 /**
  * Durable log-only record of one feedback-assist model call. It carries the
@@ -13,7 +14,7 @@ export interface AssistEventPayload {
   provider: string;
   model: string;
   instructionVersion: number;
-  language: AssistLanguage | null;
+  language: DraftLanguage | null;
   currentType: FeedbackType;
   sourceIds: string[];
   sourcesText: string;
@@ -26,11 +27,35 @@ export interface AssistEventPayload {
 declare module '@deepseek-ai/dsh-session' {
   interface SessionEventMap {
     /**
-     * Log-only record of one plugin feedback-assist model call. Informational
-     * for reconstruction; readers that do not know it skip it safely.
+     * Log-only record of one plugin feedback-assist model call, appended by
+     * the Host after the call. Carries the full model-visible envelope so the
+     * call is reconstructable from the session log. Informational for
+     * reconstruction; readers that do not know it skip it safely.
+     * @mode emit
+     * @param provider - provider route that served the call.
+     * @param model - model id that served the call.
+     * @param instructionVersion - version of the instruction prompt.
+     * @param language - draft submission language, or null when unset.
+     * @param currentType - authoritative feedback type at call time.
+     * @param sourceIds - confirmed source record ids in input order.
+     * @param sourcesText - assembled model-visible source text.
+     * @param systemText - assembled instruction text.
+     * @param outcome - the assist outcome.
+     * @param failureCode - provider failure code, when the call failed.
+     * @param at - ISO timestamp of the call.
      */
     'dsh-feedback-bridge/assist': AssistEventPayload;
   }
+}
+
+/**
+ * Fail loud when a closed-union switch reaches an unhandled member.
+ *
+ * @param value - the never value that should be unreachable.
+ * @returns never.
+ */
+function assertNever(value: never): never {
+  throw new Error('unreachable assist outcome: ' + String(value));
 }
 
 /**
@@ -88,5 +113,7 @@ export function buildAssistEventPayload(outcome: AssistOutcome, input: AssistInp
         sourcesText: outcome.sourcesText,
         systemText: outcome.systemText,
       };
+    default:
+      return assertNever(outcome);
   }
 }

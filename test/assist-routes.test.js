@@ -66,6 +66,7 @@ function createHarness(dshHome, options = {}) {
   const appended = [];
   const fakeSession = {
     requestHeader() {
+      if (options.headerError) throw new Error('header boom');
       return options.header;
     },
     append(type, data) {
@@ -74,6 +75,7 @@ function createHarness(dshHome, options = {}) {
   };
   const sessions = {
     get(id) {
+      if (options.getThrows) throw new Error('store boom');
       return options.liveSessionId === id ? fakeSession : undefined;
     },
   };
@@ -245,6 +247,28 @@ test('POST assist returns model-failed with the provider failure code', async ()
   }
 });
 
+test('POST assist never calls the model when the session is not live and no event can be recorded', async () => {
+  const home = tempHome();
+  // The session id in the body is NOT in the live store: there is no place to
+  // record the model-visible envelope, so the call must not proceed.
+  const harness = createHarness(home, { header: HEADER, liveSessionId: 'other-session' });
+  const { fiber, restore } = await harness.load();
+  try {
+    const route = harness.routes.get('/dsh-feedback-bridge/assist');
+    const response = createResponse();
+    await route.handler(createRequest({ body: JSON.stringify(validBody()) }), response);
+    assert.equal(response.code, 200);
+    const payload = JSON.parse(response.body);
+    assert.equal(payload.status, 'no-model-context');
+    assert.equal(harness.streamCalls(), 0);
+    assert.deepEqual(harness.appended, []);
+  } finally {
+    restore();
+    await fiber.dispose().catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('POST assist returns no-model-context when the session has no request header and never calls the model', async () => {
   const home = tempHome();
   const harness = createHarness(home, { header: undefined, liveSessionId: 'session-1' });
@@ -284,6 +308,43 @@ test('POST assist rejects invalid request bodies with 400', async () => {
       assert.equal(response.code, 400, JSON.stringify(body).slice(0, 120));
     }
     assert.equal(harness.streamCalls(), 0);
+  } finally {
+    restore();
+    await fiber.dispose().catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('POST assist maps a session config resolution failure to model-failed without calling the model', async () => {
+  const home = tempHome();
+  const harness = createHarness(home, { headerError: true, liveSessionId: 'session-1' });
+  const { fiber, restore } = await harness.load();
+  try {
+    const route = harness.routes.get('/dsh-feedback-bridge/assist');
+    const response = createResponse();
+    await route.handler(createRequest({ body: JSON.stringify(validBody()) }), response);
+    assert.equal(response.code, 200);
+    const payload = JSON.parse(response.body);
+    assert.equal(payload.status, 'model-failed');
+    assert.equal(payload.code, 'MODEL_CONFIG_ERROR');
+    assert.equal(harness.streamCalls(), 0);
+  } finally {
+    restore();
+    await fiber.dispose().catch(() => {});
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('POST assist responds 500 when the session lookup itself fails so the route never hangs', async () => {
+  const home = tempHome();
+  const harness = createHarness(home, { getThrows: true, header: HEADER, liveSessionId: 'session-1' });
+  const { fiber, restore } = await harness.load();
+  try {
+    const route = harness.routes.get('/dsh-feedback-bridge/assist');
+    const response = createResponse();
+    await route.handler(createRequest({ body: JSON.stringify(validBody()) }), response);
+    assert.equal(response.code, 500);
+    assert.deepEqual(JSON.parse(response.body), { error: 'assist failed' });
   } finally {
     restore();
     await fiber.dispose().catch(() => {});

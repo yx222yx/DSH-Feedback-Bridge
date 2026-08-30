@@ -114,37 +114,14 @@ function byteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-/** Assert a plain-object value, naming the offending path. */
-function assertObject(value: unknown, path: string): asserts value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(path + ' must be an object');
-  }
-}
-
-/** Assert a string field, naming the offending path. */
-function assertString(value: unknown, path: string): asserts value is string {
-  if (typeof value !== 'string') throw new Error(path + ' must be a string');
-}
-
-/** Assert a bounded string field. */
-function assertBoundedString(value: unknown, path: string, cap: number): void {
-  assertString(value, path);
-  if (byteLength(value) > cap) throw new Error(path + ' exceeds the ' + cap + ' byte cap');
-}
-
-/** Assert a member of a closed roster. */
-function assertMember(value: unknown, path: string, roster: readonly string[]): void {
-  if (!(roster as readonly string[]).includes(value as string)) {
-    throw new Error(path + ' must be one of: ' + roster.join(', '));
-  }
-}
-
 /**
- * Collect every validation error in a parsed candidate, so repair-needed
- * surfaces a complete list instead of only the first failure.
+ * Collect every validation error in a parsed candidate as a stable machine
+ * code (a FeedbackBridgeKey value), so repair-needed surfaces a complete,
+ * locale-owned list instead of English sentences. The Client maps each code
+ * to localized text; internal codes never leak raw exception messages.
  *
  * @param value - the parsed JSON candidate.
- * @returns one stable error string per invalid aspect.
+ * @returns one stable error code per invalid aspect.
  */
 export function collectAssistErrors(value: unknown): string[] {
   const errors: string[] = [];
@@ -156,49 +133,70 @@ export function collectAssistErrors(value: unknown): string[] {
     }
   };
   collect(() => {
-    assertObject(value, 'result');
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('assist.error.notJson');
+    }
     const record = value as Record<string, unknown>;
-    collect(() => assertMember(record.type, 'type', FEEDBACK_TYPES as readonly string[]));
-    collect(() => assertBoundedString(record.typeReason, 'typeReason', MAX_TYPE_REASON));
     collect(() => {
-      if (!Array.isArray(record.missingInfo)) throw new Error('missingInfo must be an array');
-      if (record.missingInfo.length > MAX_MISSING_INFO) {
-        throw new Error('missingInfo must contain at most ' + MAX_MISSING_INFO + ' entries');
+      if (!(FEEDBACK_TYPES as readonly string[]).includes(record.type as string)) throw new Error('assist.error.type');
+    });
+    collect(() => {
+      if (typeof record.typeReason !== 'string' || byteLength(record.typeReason) > MAX_TYPE_REASON) {
+        throw new Error('assist.error.typeReason');
       }
-      record.missingInfo.forEach((entry, index) => {
+    });
+    collect(() => {
+      if (!Array.isArray(record.missingInfo)) throw new Error('assist.error.missingInfo');
+      if (record.missingInfo.length > MAX_MISSING_INFO) throw new Error('assist.error.missingInfo');
+      record.missingInfo.forEach((entry) => {
         collect(() => {
-          assertObject(entry, 'missingInfo.' + index);
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('assist.error.missingInfo');
           const item = entry as Record<string, unknown>;
-          assertMember(item.field, 'missingInfo.' + index + '.field', MISSING_FIELD_KEYS as readonly string[]);
-          collect(() => assertBoundedString(item.reason, 'missingInfo.' + index + '.reason', MAX_MISSING_REASON));
-          collect(() => assertMember(item.importance, 'missingInfo.' + index + '.importance', ['low', 'medium', 'high']));
+          if (!(MISSING_FIELD_KEYS as readonly string[]).includes(item.field as string)) {
+            throw new Error('assist.error.missing.field');
+          }
+          if (typeof item.reason !== 'string' || byteLength(item.reason) > MAX_MISSING_REASON) {
+            throw new Error('assist.error.missing.reason');
+          }
+          if (item.importance !== 'low' && item.importance !== 'medium' && item.importance !== 'high') {
+            throw new Error('assist.error.missing.importance');
+          }
         });
       });
     });
     collect(() => {
-      assertObject(record.draft, 'draft');
+      if (record.draft === null || typeof record.draft !== 'object' || Array.isArray(record.draft)) {
+        throw new Error('assist.error.draft');
+      }
       const draft = record.draft as Record<string, unknown>;
       for (const key of DRAFT_KEYS) {
-        if (!(key in draft)) throw new Error('draft.' + key + ' is required');
-      }
-      for (const key of DRAFT_KEYS) {
-        const cap = key === 'title' ? MAX_DRAFT_TITLE : MAX_DRAFT_FIELD;
-        collect(() => assertBoundedString(draft[key], 'draft.' + key, cap));
+        collect(() => {
+          const cap = key === 'title' ? MAX_DRAFT_TITLE : MAX_DRAFT_FIELD;
+          if (typeof draft[key] !== 'string' || byteLength(draft[key]) > cap) {
+            throw new Error('assist.error.draft.' + key);
+          }
+        });
       }
     });
     collect(() => {
-      if (!Array.isArray(record.privacyFindings)) throw new Error('privacyFindings must be an array');
-      if (record.privacyFindings.length > MAX_PRIVACY_FINDINGS) {
-        throw new Error('privacyFindings must contain at most ' + MAX_PRIVACY_FINDINGS + ' entries');
-      }
-      record.privacyFindings.forEach((entry, index) => {
+      if (!Array.isArray(record.privacyFindings)) throw new Error('assist.error.privacy');
+      if (record.privacyFindings.length > MAX_PRIVACY_FINDINGS) throw new Error('assist.error.privacy');
+      record.privacyFindings.forEach((entry) => {
         collect(() => {
-          assertObject(entry, 'privacyFindings.' + index);
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('assist.error.privacy');
           const item = entry as Record<string, unknown>;
-          assertMember(item.kind, 'privacyFindings.' + index + '.kind', PRIVACY_KINDS as readonly string[]);
-          collect(() => assertMember(item.severity, 'privacyFindings.' + index + '.severity', PRIVACY_SEVERITIES as readonly string[]));
-          collect(() => assertBoundedString(item.quote, 'privacyFindings.' + index + '.quote', MAX_PRIVACY_QUOTE));
-          collect(() => assertBoundedString(item.reason, 'privacyFindings.' + index + '.reason', MAX_PRIVACY_REASON));
+          if (!(PRIVACY_KINDS as readonly string[]).includes(item.kind as string)) {
+            throw new Error('assist.error.privacy.kind');
+          }
+          if (!(PRIVACY_SEVERITIES as readonly string[]).includes(item.severity as string)) {
+            throw new Error('assist.error.privacy.severity');
+          }
+          if (typeof item.quote !== 'string' || byteLength(item.quote) > MAX_PRIVACY_QUOTE) {
+            throw new Error('assist.error.privacy.quote');
+          }
+          if (typeof item.reason !== 'string' || byteLength(item.reason) > MAX_PRIVACY_REASON) {
+            throw new Error('assist.error.privacy.reason');
+          }
         });
       });
     });
@@ -269,18 +267,25 @@ export function parseAssistText(text: string): AssistParseOutcome {
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(trimmed);
-  } catch {
+  } catch (error) {
+    // Strict parse failed because the response is not clean JSON (extra prose,
+    // markdown fences, or a truncated object); the lenient recovery below
+    // strips fences and extracts the first balanced object.
+    void error;
     const extracted = extractJsonObject(trimmed);
     if (extracted !== null) {
       try {
         parsed = JSON.parse(extracted);
-      } catch {
+      } catch (innerError) {
+        // The extracted object is still malformed JSON; the caller reports
+        // repair-needed with the raw text preserved.
+        void innerError;
         parsed = null;
       }
     }
   }
   if (parsed === null) {
-    return { status: 'repair-needed', errors: ['the model response is not a JSON object'] };
+    return { status: 'repair-needed', errors: ['assist.error.notJson'] };
   }
   const errors = collectAssistErrors(parsed);
   if (errors.length > 0) return { status: 'repair-needed', errors };

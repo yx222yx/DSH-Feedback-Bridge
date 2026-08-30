@@ -1175,6 +1175,8 @@ test('fake-backed model-assist: malformed output enters the repair panel and rev
       await page.click('[data-testid="dsh-feedback-assist-run"]');
       await waitForText(page, '[data-testid="dsh-feedback-assist-repair"]', () => true);
       assert.equal(await page.inputValue('[data-testid="dsh-feedback-assist-repair-text"]'), 'this is not json at all');
+      // Validation errors render as localized text; no raw error code leaks.
+      assert.doesNotMatch(await page.locator('[data-testid="dsh-feedback-assist-repair"]').innerText(), /assist\.error\./);
 
       // Editing the raw text to a valid response and re-validating recovers locally.
       await page.fill('[data-testid="dsh-feedback-assist-repair-text"]', FAKE_SUGGESTION);

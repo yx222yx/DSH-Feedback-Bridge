@@ -1,4 +1,6 @@
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots';
+import type { PrivacyKind, PrivacySeverity } from '../host/assist-schema.js';
+import type { DraftLanguage } from '../host/feedback-types.js';
 import type { ConfirmedSourceRecord } from './sources.js';
 
 /** Dictionary key union of the plugin's locale namespace. */
@@ -91,6 +93,7 @@ export type FeedbackBridgeKey =
   | 'assist.generating'
   | 'assist.noSourcesOrSession'
   | 'assist.recommendedType'
+  | 'assist.typeReason'
   | 'assist.useRecommendedType'
   | 'assist.importance.low'
   | 'assist.importance.medium'
@@ -105,6 +108,26 @@ export type FeedbackBridgeKey =
   | 'assist.overwriteBody'
   | 'assist.replace'
   | 'assist.keepEdit'
+  | 'assist.error.notJson'
+  | 'assist.error.truncated'
+  | 'assist.error.type'
+  | 'assist.error.typeReason'
+  | 'assist.error.missingInfo'
+  | 'assist.error.missing.field'
+  | 'assist.error.missing.reason'
+  | 'assist.error.missing.importance'
+  | 'assist.error.draft'
+  | 'assist.error.draft.title'
+  | 'assist.error.draft.scenario'
+  | 'assist.error.draft.gap'
+  | 'assist.error.draft.desired'
+  | 'assist.error.draft.context'
+  | 'assist.error.privacy'
+  | 'assist.error.privacy.kind'
+  | 'assist.error.privacy.severity'
+  | 'assist.error.privacy.quote'
+  | 'assist.error.privacy.reason'
+  | 'assist.errorCode'
   | 'privacy.title'
   | 'privacy.severity.critical'
   | 'privacy.severity.warning'
@@ -114,6 +137,7 @@ export type FeedbackBridgeKey =
   | 'privacy.kind.private-path'
   | 'privacy.kind.confidential'
   | 'privacy.kind.excess-context'
+  | 'privacy.excessContextReason'
   | 'status.noModelContext'
   | 'status.assistFailed';
 
@@ -126,8 +150,7 @@ export type FeedbackFieldKey = 'title' | 'scenario' | 'gap' | 'desired' | 'conte
 /** One of the four community-feedback types the review card supports. */
 export type FeedbackType = 'plugin-request' | 'harness-feature' | 'harness-defect' | 'custom';
 
-/** User-selected submission language; absence means the English default. */
-export type DraftLanguage = 'zh' | 'en';
+export type { DraftLanguage } from '../host/feedback-types.js';
 
 /** Editable draft fields without the fixed session type. */
 export type FeedbackDraftFields = Record<FeedbackFieldKey, string>;
@@ -206,21 +229,19 @@ export interface DraftPersistence {
   keepalive(draft: FeedbackDraft | null, sources: readonly ConfirmedSourceRecord[]): void;
 }
 
-/** Advisory privacy finding classes the deterministic scan can report. */
-export type PrivacyFindingKind = 'secret' | 'personal-info' | 'private-path' | 'confidential' | 'excess-context';
-
-/** Advisory severity ladder shown in the privacy panel. */
-export type PrivacySeverity = 'info' | 'warning' | 'critical';
+export type { PrivacyKind as PrivacyFindingKind, PrivacySeverity } from '../host/assist-schema.js';
 
 /** One read-only privacy finding; findings never rewrite content. */
 export interface PrivacyFinding {
   id: string;
   severity: PrivacySeverity;
-  kind: PrivacyFindingKind;
+  kind: PrivacyKind;
   location: 'source' | 'draft';
   sourceId?: string;
   field?: FeedbackFieldKey;
   excerpt: string;
+  /** Locale-owned message key for synthetic findings; content excerpts use none. */
+  reasonKey?: FeedbackBridgeKey;
 }
 
 /** One feedback-assist request from the Client to the Host route. */
@@ -237,7 +258,7 @@ export interface AssistSuggestion {
   typeReason: string;
   missingInfo: { field: string; reason: string; importance: 'low' | 'medium' | 'high' }[];
   draft: FeedbackDraftFields;
-  privacyFindings: { kind: string; severity: PrivacySeverity; quote: string; reason: string }[];
+  privacyFindings: { kind: PrivacyKind; severity: PrivacySeverity; quote: string; reason: string }[];
 }
 
 /** Discriminated assist outcome as returned by the Host route. */

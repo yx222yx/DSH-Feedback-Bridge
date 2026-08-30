@@ -89,6 +89,33 @@ test('scanPrivacy flags a private path and reports excess context as advisory in
   assert.ok(contextFindings.some((finding) => finding.kind === 'excess-context' && finding.severity === 'info'));
 });
 
+test('scanPrivacy flags personal information like email addresses and phone numbers as warnings', () => {
+  const email = scanPrivacy(cleanFields({ context: 'reach me at alice@example.com please' }), []);
+  assert.ok(email.some((finding) => finding.kind === 'personal-info' && finding.severity === 'warning'));
+  const phone = scanPrivacy(cleanFields({ context: 'call 13812345678' }), []);
+  assert.ok(phone.some((finding) => finding.kind === 'personal-info'));
+  const idNumber = scanPrivacy(cleanFields({ context: 'id 11010119900307453X' }), []);
+  assert.ok(idNumber.some((finding) => finding.kind === 'personal-info'));
+});
+
+test('scanPrivacy flags confidential-content markers as warnings', () => {
+  for (const text of ['this is CONFIDENTIAL material', '这是机密内部资料']) {
+    const findings = scanPrivacy(cleanFields({ context: text }), []);
+    assert.ok(findings.some((finding) => finding.kind === 'confidential'), text);
+  }
+});
+
+test('the excess-context finding uses a locale-owned reason key and no hardcoded English', () => {
+  const huge = Array.from({ length: 40 }, (_, i) => sampleSource({ id: 's:' + i, text: 'x'.repeat(4000) }));
+  const findings = scanPrivacy(cleanFields(), huge);
+  const excess = findings.find((finding) => finding.kind === 'excess-context');
+  assert.ok(excess);
+  assert.equal(excess.severity, 'info');
+  assert.equal(excess.reasonKey, 'privacy.excessContextReason');
+  assert.doesNotMatch(excess.excerpt, /bytes/i);
+  assert.match(excess.excerpt, /^\d+$/);
+});
+
 test('scanPrivacy returns no findings for clean content', () => {
   assert.deepEqual(scanPrivacy(cleanFields(), [sampleSource()]), []);
 });

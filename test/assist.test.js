@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { effectiveLanguage } from '../lib/feedback-types.js';
 import {
   runAssist,
   buildAssistRequest,
   assembleSourcesText,
-  effectiveLanguage,
   MAX_ASSIST_RESPONSE_CHARS,
 } from '../lib/assist.js';
 
@@ -134,6 +134,22 @@ test('runAssist returns model-failed when stream iteration throws', async () => 
   if (outcome.status === 'model-failed') assert.equal(outcome.code, 'UNKNOWN');
 });
 
+test('runAssist returns model-failed MODEL_CONFIG_ERROR when resolving the config throws and never calls the model', async () => {
+  let streamCalled = false;
+  const outcome = await runAssist({
+    resolveConfig() {
+      throw new Error('config boom');
+    },
+    stream() {
+      streamCalled = true;
+      return [];
+    },
+  }, sampleInput());
+  assert.equal(outcome.status, 'model-failed');
+  if (outcome.status === 'model-failed') assert.equal(outcome.code, 'MODEL_CONFIG_ERROR');
+  assert.equal(streamCalled, false);
+});
+
 test('runAssist returns no-model-context when the session has no resolved model config', async () => {
   const outcome = await runAssist({
     resolveConfig() {
@@ -179,6 +195,14 @@ test('assembleSourcesText joins every confirmed source snapshot in order', () =>
   assert.ok(text.indexOf('FIRST_SENTINEL') < text.indexOf('SECOND_SENTINEL'));
   assert.match(text, /tool/);
   assert.doesNotMatch(text, /UNCONFIRMED_SENTINEL/);
+});
+
+test('the system prompt embeds the per-type information needs as a structured marker', () => {
+  const request = buildAssistRequest({ provider: 'p', model: 'm' }, sampleInput({ currentType: 'harness-defect' }));
+  assert.match(request.system ?? '', /Relevant information for harness-defect:/);
+  assert.match(request.system ?? '', /reproduction/);
+  assert.match(request.system ?? '', /environment/);
+  assert.match(request.system ?? '', /version/);
 });
 
 test('effectiveLanguage returns English only when the user has not selected a language', () => {

@@ -42,17 +42,20 @@ The current slice ships the installable `dsh.bundle` for the DSH `web` profile:
   the conversation (`ctx.sessions` request-header config) through the official
   Host `ctx.llm` seam — no plugin model selector, no plugin API key. The
   workspace can generate suggestions (recommended feedback type + reason,
-  non-blocking missing-information notes, an editable Chinese/English draft,
-  advisory privacy findings) from the confirmed sources only; the model output
-  is staged and every application is an explicit per-field action that never
-  silently overwrites a newer edit. Structured output is validated at runtime
-  with a repair panel for invalid/truncated responses (re-validation runs
-  locally), and provider failures surface distinct states with retry. Draft
+  non-blocking missing-information notes scoped per feedback type, an editable
+  Chinese/English draft, advisory privacy findings) from the confirmed sources
+  only; the model output is staged and every application is an explicit
+  per-field action guarded by a field-version snapshot taken at request start,
+  so a suggestion never silently overwrites content the user established
+  during or before the request. Structured output is validated at runtime with
+  a repair panel for invalid/truncated responses (re-validation runs locally),
+  and provider failures surface distinct localized states with retry. Draft
   schema v3 adds the authoritative feedback `type` (plugin request / Harness
   feature suggestion / Harness defect report / custom) and the optional
   submission `language` (English is the default only when unset). Privacy
-  findings are advisory and read-only: secrets, private paths, and excessive
-  context are flagged but never rewritten, redacted, or auto-published.
+  findings are advisory and read-only: secrets, personal information, private
+  paths, confidential content, and excessive context are flagged but never
+  rewritten, redacted, or auto-published.
 - The declared DSH compatibility range is `>=0.1.1-rc.2 <0.2.0`; an incompatible
   version fails with a clear message.
 

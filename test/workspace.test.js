@@ -352,6 +352,13 @@ function createFakePersistence({ window, state }) {
 
 function findByTestId(vnode, testid) {
   if (vnode == null || typeof vnode !== 'object') return null;
+  if (Array.isArray(vnode)) {
+    for (const child of vnode) {
+      const found = findByTestId(child, testid);
+      if (found) return found;
+    }
+    return null;
+  }
   if (vnode.props && vnode.props['data-testid'] === testid) return vnode;
   if (Array.isArray(vnode.children)) {
     for (const child of vnode.children) {
@@ -382,7 +389,7 @@ function waitTick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function setupWorkspace({ manualTimers = false, persisted = null, failSave = false, failRemove = false, failLoad = false } = {}) {
+function setupWorkspace({ manualTimers = false, persisted = null, failSave = false, failRemove = false, failLoad = false, assistTransport = null, conversation = null } = {}) {
   const { React, render, reset } = createStatefulReact();
   const { window, state } = createFakeWindow({ manualTimers, persisted, failSave, failRemove, failLoad });
   const moduleExports = loadClientExports(React, window);
@@ -390,8 +397,78 @@ function setupWorkspace({ manualTimers = false, persisted = null, failSave = fal
   const sessions = moduleExports.createFeedbackSessionController();
   const persistence = createFakePersistence({ window, state });
   const closed = [];
-  const workspace = () => React.createElement(moduleExports.FeedbackWorkspace, { t, sessions, persistence, onClose: () => closed.push(true) });
+  const workspace = () => React.createElement(moduleExports.FeedbackWorkspace, {
+    t,
+    sessions,
+    persistence,
+    assistTransport: assistTransport ?? { run: () => Promise.reject(new Error('no transport')) },
+    conversation,
+    onClose: () => closed.push(true),
+  });
   return { React, render, reset, window, state, moduleExports, t, sessions, persistence, closed, workspace };
+}
+
+/** Fake conversation source exposing a session id so the assist control enables. */
+function conversationSource(sessionId = 'session-1') {
+  const read = { sessionId, snapshot: { nodes: [], openState: 'open' }, meta: {} };
+  return {
+    subscribe() {
+      return () => {};
+    },
+    getSnapshot() {
+      return read;
+    },
+    getServerSnapshot() {
+      return read;
+    },
+  };
+}
+
+/** A confirmed-source record for the workspace controller. */
+function sourceRecord(overrides = {}) {
+  return {
+    id: 'session-1:user:3',
+    sessionId: 'session-1',
+    kind: 'message',
+    role: 'user',
+    label: '用户消息',
+    text: 'SENTINEL_CONFIRMED',
+    truncated: false,
+    sensitive: false,
+    capturedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** Assist transport whose responses are resolved by the test after each request. */
+function deferredAssist() {
+  const calls = [];
+  const resolvers = [];
+  return {
+    calls,
+    run(request) {
+      calls.push(request);
+      return new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+    },
+    resolve(outcome) {
+      const resolve = resolvers.shift();
+      if (resolve) resolve(outcome);
+    },
+  };
+}
+
+/** A suggestion whose type matches the current draft type (custom). */
+function matchingSuggestion(overrides = {}) {
+  return {
+    type: 'custom',
+    typeReason: '因为来源与自定义反馈一致',
+    missingInfo: [],
+    draft: { title: '建议标题', scenario: '', gap: '', desired: '', context: '' },
+    privacyFindings: [],
+    ...overrides,
+  };
 }
 
 test('opening the workspace starts a custom-feedback session and typing updates the exact preview', async () => {
@@ -454,6 +531,84 @@ test('typing autosaves the draft to the host and the queue posts the latest fiel
   const last = JSON.parse(saves[saves.length - 1].init.body);
   assert.deepEqual(last.draft, { title: '自动保存的标题', scenario: '自动保存的场景', gap: '', desired: '', context: '', type: 'custom' });
   assert.deepEqual(h.state.persisted, last.draft);
+});
+
+test('an edit made while the assist request is in flight is never silently overwritten by the suggestion', async () => {
+  const deferred = deferredAssist();
+  const h = setupWorkspace({ assistTransport: deferred, conversation: conversationSource() });
+  h.sessions.setSources([sourceRecord()]);
+  let vnode = h.render(h.workspace);
+
+  // Start the assist request; the transport stays pending.
+  findByTestId(vnode, 'dsh-feedback-assist-run').props.onClick();
+  vnode = h.render(h.workspace);
+  assert.equal(deferred.calls.length, 1);
+
+  // The user edits the title while the request is in flight.
+  findByTestId(vnode, 'dsh-feedback-title').props.onChange({ target: { value: '我的编辑' } });
+  vnode = h.render(h.workspace);
+
+  // The response returns with a different suggested title.
+  deferred.resolve({ status: 'ok', result: matchingSuggestion({ draft: { title: '建议标题', scenario: '', gap: '', desired: '', context: '' } }) });
+  await waitTick();
+  vnode = h.render(h.workspace);
+
+  // Applying must ask for explicit confirmation instead of overwriting silently.
+  findByTestId(vnode, 'dsh-feedback-assist-apply-title').props.onClick();
+  vnode = h.render(h.workspace);
+  assert.ok(findByTestId(vnode, 'dsh-feedback-overwrite-confirm'), 'an in-flight edit must require confirmation');
+  assert.equal(findByTestId(vnode, 'dsh-feedback-title').props.value, '我的编辑');
+
+  // Confirming the overwrite applies the suggestion.
+  findByTestId(vnode, 'dsh-feedback-overwrite-confirm-action').props.onClick();
+  vnode = h.render(h.workspace);
+  assert.equal(findByTestId(vnode, 'dsh-feedback-title').props.value, '建议标题');
+});
+
+test('an edit made before the assist request stays overwrite-guarded as user content after applying once', async () => {
+  const deferred = deferredAssist();
+  const h = setupWorkspace({ assistTransport: deferred, conversation: conversationSource() });
+  h.sessions.setSources([sourceRecord()]);
+  let vnode = h.render(h.workspace);
+
+  // Generate a suggestion with no in-flight edit: applying is direct.
+  findByTestId(vnode, 'dsh-feedback-assist-run').props.onClick();
+  vnode = h.render(h.workspace);
+  deferred.resolve({ status: 'ok', result: matchingSuggestion({ draft: { title: '建议标题', scenario: '建议场景', gap: '', desired: '', context: '' } }) });
+  await waitTick();
+  vnode = h.render(h.workspace);
+  findByTestId(vnode, 'dsh-feedback-assist-apply-title').props.onClick();
+  vnode = h.render(h.workspace);
+  assert.equal(findByTestId(vnode, 'dsh-feedback-title').props.value, '建议标题');
+
+  // A second generation with a different title must now guard the applied field.
+  findByTestId(vnode, 'dsh-feedback-assist-run').props.onClick();
+  vnode = h.render(h.workspace);
+  deferred.resolve({ status: 'ok', result: matchingSuggestion({ draft: { title: '新建议标题', scenario: '', gap: '', desired: '', context: '' } }) });
+  await waitTick();
+  vnode = h.render(h.workspace);
+  findByTestId(vnode, 'dsh-feedback-assist-apply-title').props.onClick();
+  vnode = h.render(h.workspace);
+  assert.ok(findByTestId(vnode, 'dsh-feedback-overwrite-confirm'), 'applied text is user content and must be guarded');
+});
+
+test('the recommendation reason is shown even when the model recommends the current type', async () => {
+  const deferred = deferredAssist();
+  const h = setupWorkspace({ assistTransport: deferred, conversation: conversationSource() });
+  h.sessions.setSources([sourceRecord()]);
+  let vnode = h.render(h.workspace);
+
+  findByTestId(vnode, 'dsh-feedback-assist-run').props.onClick();
+  vnode = h.render(h.workspace);
+  deferred.resolve({ status: 'ok', result: matchingSuggestion() });
+  await waitTick();
+  vnode = h.render(h.workspace);
+
+  const recommendation = findByTestId(vnode, 'dsh-feedback-assist-recommendation');
+  assert.ok(recommendation, 'the recommendation block must render even for the current type');
+  const text = collectText(recommendation).join('');
+  assert.match(text, /因为来源与自定义反馈一致/);
+  assert.equal(findByTestId(vnode, 'dsh-feedback-assist-apply-type'), null, 'no apply-type button when the type matches');
 });
 
 test('a persisted draft is restored on open with the restored notice', async () => {

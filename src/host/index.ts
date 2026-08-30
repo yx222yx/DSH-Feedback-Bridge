@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import { SessionId } from '@deepseek-ai/dsh-session';
-import { runAssist, type AssistInput } from './assist.js';
+import { assistEnvelope, runAssist, type AssistInput } from './assist.js';
 import { buildAssistEventPayload } from './assist-event.js';
 import {
   assertFeedbackType,
@@ -459,17 +459,28 @@ async function handleAssistRequest(ctx: Context, request: IncomingMessage, respo
     writeJson(response, 400, { error: (error as Error).message });
     return;
   }
-  const outcome = await runAssist({
-    resolveConfig(sessionId) {
-      const session = ctx.sessions.get(SessionId(sessionId));
-      return session?.requestHeader()?.config;
-    },
-    stream(options) {
-      return ctx.llm.stream(options);
-    },
-  }, input);
-  const session = ctx.sessions.get(SessionId(input.sessionId));
-  if (session !== undefined) {
+  try {
+    // Resolve the live session BEFORE any model call: without a session there
+    // is no model context and no place to record the model-visible envelope,
+    // so the call must not proceed unrecorded (model-visible implies logged).
+    const session = ctx.sessions.get(SessionId(input.sessionId));
+    if (session === undefined) {
+      const envelope = assistEnvelope(input);
+      writeJson(response, 200, {
+        status: 'no-model-context',
+        sourcesText: envelope.sourcesText,
+        systemText: envelope.systemText,
+      });
+      return;
+    }
+    const outcome = await runAssist({
+      resolveConfig() {
+        return session.requestHeader()?.config;
+      },
+      stream(options) {
+        return ctx.llm.stream(options);
+      },
+    }, input);
     try {
       session.append('dsh-feedback-bridge/assist', buildAssistEventPayload(outcome, input));
     } catch {
@@ -478,8 +489,12 @@ async function handleAssistRequest(ctx: Context, request: IncomingMessage, respo
       writeJson(response, 500, { error: 'failed to record the assist call' });
       return;
     }
+    writeJson(response, 200, outcome);
+  } catch {
+    // Any unexpected failure must still respond so the route never hangs;
+    // the user keeps their draft and manual control.
+    writeJson(response, 500, { error: 'assist failed' });
   }
-  writeJson(response, 200, outcome);
 }
 
 /**

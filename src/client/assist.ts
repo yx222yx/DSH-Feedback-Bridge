@@ -1,5 +1,7 @@
-import type { AssistOutcome, AssistRequest, AssistTransport, DraftLanguage, FetchLike } from './types.js';
+import type { AssistOutcome, AssistRequest, AssistTransport, FetchLike } from './types.js';
+import { effectiveLanguage } from '../host/feedback-types.js';
 import { parseAssistText } from '../host/assist-schema.js';
+export { effectiveLanguage } from '../host/feedback-types.js';
 
 /**
  * Client feedback-assist transport: posts the validated assist request to the
@@ -7,17 +9,6 @@ import { parseAssistText } from '../host/assist-schema.js';
  * carries only the user-confirmed sources; live conversation content never
  * leaves the browser through this route.
  */
-
-/**
- * Resolve the draft submission language: an explicit selection wins, and
- * English is the default only when the user has not selected one.
- *
- * @param language - the user-selected language, or null/undefined when unset.
- * @returns the effective language.
- */
-export function effectiveLanguage(language: DraftLanguage | null | undefined): DraftLanguage {
-  return language === 'zh' ? 'zh' : 'en';
-}
 
 /**
  * Build the serialized assist transport over the same-origin assist route.

@@ -55,9 +55,10 @@ proposal; the user keeps final authority.
   authority, so repair re-validation runs the same rules locally without a
   second model call.
 - **Model output is advisory only.** It is staged in the UI; applying a
-  suggested field is an explicit per-field action, guarded by an
-  edit-timestamp check so a suggestion never silently overwrites a newer user
-  edit. The authoritative feedback type and language live on the draft record
+  suggested field is an explicit per-field action, guarded by a field-version
+  snapshot taken at request start so a suggestion never silently overwrites
+  content the user established during or after the request, or pre-existing
+  content that differs from the suggestion. The authoritative feedback type and language live on the draft record
   (schema v3) and are only ever changed by the user.
 - **Model-visible input is logged.** Before responding, the Host appends a
   log-only `dsh-feedback-bridge/assist` session event (merged into

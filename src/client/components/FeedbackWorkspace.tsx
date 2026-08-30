@@ -23,7 +23,6 @@ import type {
   FeedbackSessionController,
   FeedbackType,
   PrivacyFinding,
-  PrivacyFindingKind,
   T,
   WorkspaceNotice,
 } from '../types.js';
@@ -94,7 +93,6 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
   const [repair, setRepair] = React.useState<{ rawText: string; errors: string[] } | null>(null);
   const [repairText, setRepairText] = React.useState('');
   const [modelError, setModelError] = React.useState<{ code: string; message: string } | null>(null);
-  const [assistRunAt, setAssistRunAt] = React.useState(0);
   const [confirmOverwrite, setConfirmOverwrite] = React.useState<FeedbackFieldKey | null>(null);
   const userInteractedRef = React.useRef(false);
   const savedRef = React.useRef<string | null>(null);
@@ -103,7 +101,11 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
   fieldsRef.current = fields;
   const sourcesRef = React.useRef(sources);
   sourcesRef.current = sources;
-  const lastEditAtRef = React.useRef<Record<FeedbackFieldKey, number>>({ title: 0, scenario: 0, gap: 0, desired: 0, context: 0 });
+  // Field-version snapshot taken when a suggestion request is INITIATED
+  // (not when it resolves): applying a suggestion must not silently overwrite
+  // content the user established during or after the request, or content that
+  // pre-existed the request and differs from the suggestion.
+  const fieldsAtRequestRef = React.useRef<FeedbackDraftFields>({ title: '', scenario: '', gap: '', desired: '', context: '' });
   const conversationRead = useConversationRead(conversation);
   const sourceCopy: SourceCopy = {
     diagTitle: t('sources.diag.title'),
@@ -143,7 +145,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
   const modelFindings: PrivacyFinding[] = (suggestion?.privacyFindings ?? []).map((finding, index) => ({
     id: 'privacy:model:' + index,
     severity: finding.severity,
-    kind: finding.kind as PrivacyFindingKind,
+    kind: finding.kind,
     location: 'source',
     excerpt: finding.quote + (finding.reason !== '' ? ' — ' + finding.reason : ''),
   }));
@@ -257,7 +259,6 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
     const next = { ...fieldsRef.current, [fieldKey]: current + separator + quoted };
     setFields(next);
     sessions.update({ [fieldKey]: next[fieldKey] });
-    lastEditAtRef.current[fieldKey] = Date.now();
     scheduleAutosave(next);
   };
 
@@ -328,7 +329,6 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
 
   const setField = (key: FeedbackFieldKey) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     userInteractedRef.current = true;
-    lastEditAtRef.current[key] = Date.now();
     const value = event.target.value;
     const next = { ...fields, [key]: value };
     setFields(next);
@@ -360,7 +360,10 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
   /** Run one feedback-assist call; model output is staged, never auto-applied. */
   const handleAssist = () => {
     if (conversationRead === undefined || sourcesRef.current.length === 0 || assistBusy) return;
-    const startedAt = Date.now();
+    // Snapshot the public fields BEFORE the async request starts: edits made
+    // while it is in flight must be confirmed before a suggestion overwrites
+    // them, and pre-existing field content is compared against the suggestion.
+    fieldsAtRequestRef.current = { title: fieldsRef.current.title, scenario: fieldsRef.current.scenario, gap: fieldsRef.current.gap, desired: fieldsRef.current.desired, context: fieldsRef.current.context };
     setAssistBusy(true);
     setModelError(null);
     setRepair(null);
@@ -375,11 +378,9 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
         setAssistBusy(false);
         if (outcome.status === 'ok') {
           setSuggestion(outcome.result);
-          setAssistRunAt(Date.now());
         } else if (outcome.status === 'repair-needed') {
           setRepair({ rawText: outcome.rawText, errors: outcome.errors });
           setRepairText(outcome.rawText);
-          setAssistRunAt(startedAt);
         } else if (outcome.status === 'model-failed') {
           setModelError({ code: outcome.code, message: outcome.message });
         } else {
@@ -395,7 +396,12 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
   /** Apply one suggested field, guarding against overwriting a newer edit. */
   const applySuggestion = (key: FeedbackFieldKey) => {
     if (suggestion === null) return;
-    if (lastEditAtRef.current[key] > assistRunAt) {
+    const snapshot = fieldsAtRequestRef.current;
+    const current = fieldsRef.current[key];
+    const suggested = suggestion.draft[key];
+    const changedSinceRequest = current !== snapshot[key];
+    const preExistingDiffers = snapshot[key] !== '' && suggested !== snapshot[key];
+    if (changedSinceRequest || preExistingDiffers) {
       setConfirmOverwrite(key);
       return;
     }
@@ -410,8 +416,6 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
     const next = { ...fields, [key]: value };
     setFields(next);
     sessions.update({ [key]: value });
-    // The applied text is now user content; a later suggestion must guard it.
-    lastEditAtRef.current[key] = Date.now();
     scheduleAutosave(next);
     setConfirmOverwrite(null);
   };
@@ -422,7 +426,9 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
     if (outcome.status === 'ok') {
       setSuggestion(outcome.result);
       setRepair(null);
-      setAssistRunAt(Date.now());
+      // A locally re-validated response is staged now; snapshot the fields so
+      // the overwrite guard compares against this moment.
+      fieldsAtRequestRef.current = { title: fieldsRef.current.title, scenario: fieldsRef.current.scenario, gap: fieldsRef.current.gap, desired: fieldsRef.current.desired, context: fieldsRef.current.context };
     } else {
       setRepair({ rawText: repairText, errors: outcome.errors });
     }
@@ -567,7 +573,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
             {modelError !== null ? (
               <div className="dsh-feedback-assist-error" data-testid="dsh-feedback-assist-error">
                 <p>{t('assist.modelFailed')}</p>
-                <p className="dsh-feedback-assist-error-detail">{modelError.code}: {modelError.message}</p>
+                <p className="dsh-feedback-assist-error-detail">{t('assist.errorCode')}: {modelError.code}</p>
                 <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-assist-retry" onClick={handleAssist}>
                   {t('assist.retry')}
                 </button>
@@ -575,15 +581,15 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
             ) : null}
             {suggestion !== null ? (
               <div className="dsh-feedback-assist-result" data-testid="dsh-feedback-assist-result">
-                {suggestion.type !== fields.type ? (
-                  <div className="dsh-feedback-assist-recommendation" data-testid="dsh-feedback-assist-recommendation">
-                    <p><strong>{t('assist.recommendedType')}:</strong> {t(('type.' + suggestion.type) as import('../types.js').FeedbackBridgeKey)}</p>
-                    <p>{suggestion.typeReason}</p>
+                <div className="dsh-feedback-assist-recommendation" data-testid="dsh-feedback-assist-recommendation">
+                  <p><strong>{t('assist.recommendedType')}:</strong> {t(('type.' + suggestion.type) as import('../types.js').FeedbackBridgeKey)}</p>
+                  <p className="dsh-feedback-assist-reason">{t('assist.typeReason')}: {suggestion.typeReason}</p>
+                  {suggestion.type !== fields.type ? (
                     <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-assist-apply-type" onClick={() => handleTypeChange({ target: { value: suggestion.type } } as React.ChangeEvent<HTMLSelectElement>)}>
                       {t('assist.useRecommendedType')}
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
                 {suggestion.missingInfo.length > 0 ? (
                   <ul className="dsh-feedback-assist-missing" data-testid="dsh-feedback-assist-missing">
                     {suggestion.missingInfo.map((item, index) => (
@@ -618,7 +624,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
               <div className="dsh-feedback-assist-repair" data-testid="dsh-feedback-assist-repair">
                 <p>{t('assist.repairTitle')}</p>
                 <ul className="dsh-feedback-assist-repair-errors">
-                  {repair.errors.map((error, index) => <li key={index}>{error}</li>)}
+                  {repair.errors.map((error, index) => <li key={index}>{t(error as import('../types.js').FeedbackBridgeKey)}</li>)}
                 </ul>
                 <textarea data-testid="dsh-feedback-assist-repair-text" rows={6} value={repairText} onChange={(event) => setRepairText(event.target.value)} />
                 <div className="dsh-feedback-assist-actions">
@@ -639,7 +645,7 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, c
                 {allFindings.map((finding) => (
                   <li key={finding.id} className={'dsh-feedback-privacy-' + finding.severity} data-testid="dsh-feedback-privacy-finding">
                     <span className="dsh-feedback-privacy-severity">{t(('privacy.severity.' + finding.severity) as import('../types.js').FeedbackBridgeKey)}</span>
-                    {t(('privacy.kind.' + finding.kind) as import('../types.js').FeedbackBridgeKey)} — {finding.excerpt}
+                    {t(('privacy.kind.' + finding.kind) as import('../types.js').FeedbackBridgeKey)} — {finding.excerpt}{finding.reasonKey !== undefined ? ' ' + t(finding.reasonKey) : ''}
                   </li>
                 ))}
               </ul>

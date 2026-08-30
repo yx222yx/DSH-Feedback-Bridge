@@ -1,7 +1,9 @@
 import type { GenerateOptions, LlmCallConfig, StreamChunk } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm/message';
 import type { ConfirmedSourceRecord, FeedbackType } from './draft-store.js';
+import { effectiveLanguage, type DraftLanguage } from './feedback-types.js';
 import { parseAssistText, type AssistResult } from './assist-schema.js';
+import { informationNeedsFor } from './type-needs.js';
 
 /**
  * Host feedback-assist pipeline: resolve the current session's model config,
@@ -20,13 +22,10 @@ export const PLUGIN_ID = 'dsh-feedback-bridge';
 /** Byte cap on the assembled model response; a longer output is truncated. */
 export const MAX_ASSIST_RESPONSE_CHARS = 128 * 1024;
 
-/** Draft submission language; absence means the English default. */
-export type AssistLanguage = 'zh' | 'en';
-
 /** One feedback-assist request as sent by the Client to the Host route. */
 export interface AssistInput {
   sessionId: string;
-  language: AssistLanguage | null;
+  language: DraftLanguage | null;
   currentType: FeedbackType;
   sources: ConfirmedSourceRecord[];
 }
@@ -93,15 +92,34 @@ function modelFailed(
   };
 }
 
+/** The model-visible envelope of one assist input: language, sources text, and system text. */
+interface AssistEnvelope {
+  language: DraftLanguage;
+  sourcesText: string;
+  systemText: string;
+}
+
+/** Compute the model-visible envelope for an assist input. */
+function envelopeOf(input: AssistInput): AssistEnvelope {
+  const language = effectiveLanguage(input.language);
+  return {
+    language,
+    sourcesText: assembleSourcesText(input.sources),
+    systemText: buildAssistSystemPrompt(language, input.currentType),
+  };
+}
+
 /**
- * Resolve the draft submission language: an explicit selection wins, and
- * English is the default only when the user has not selected one.
+ * The assembled sources/system envelope for an assist input, exported for the
+ * route's pre-call session check (no-model-context responses still describe
+ * the envelope they would have sent).
  *
- * @param language - the user-selected language, or null/undefined when unset.
- * @returns the effective language.
+ * @param input - the validated assist input.
+ * @returns the sources and system text.
  */
-export function effectiveLanguage(language: AssistLanguage | null | undefined): AssistLanguage {
-  return language === 'zh' ? 'zh' : 'en';
+export function assistEnvelope(input: AssistInput): { sourcesText: string; systemText: string } {
+  const envelope = envelopeOf(input);
+  return { sourcesText: envelope.sourcesText, systemText: envelope.systemText };
 }
 
 /**
@@ -128,11 +146,7 @@ export function assembleSourcesText(sources: readonly ConfirmedSourceRecord[]): 
  * @param instructionVersion - the prompt version to stamp.
  * @returns the system prompt text.
  */
-export function buildAssistSystemPrompt(
-  language: AssistLanguage,
-  currentType: FeedbackType,
-  instructionVersion: number = INSTRUCTION_VERSION,
-): string {
+export function buildAssistSystemPrompt(language: DraftLanguage, currentType: FeedbackType): string {
   return [
     'You help the user prepare a community feedback draft for DeepSeek Harness. Everything you produce is a suggestion; the user keeps final authority.',
     'Language: ' + language,
@@ -140,6 +154,7 @@ export function buildAssistSystemPrompt(
     'Feedback sources follow in the user message. Use ONLY those sources; never invent conversation content.',
     'Recommend one feedback type from: plugin-request, harness-feature, harness-defect, custom. Explain the recommendation.',
     'List missing but non-mandatory information; omissions must never block the draft.',
+    'Relevant information for ' + currentType + ': ' + informationNeedsFor(currentType).join(', '),
     'Draft the title and body fields in the selected language.',
     'Flag likely secrets, personal information, private paths, confidential content, and excessive context. Never rewrite, redact, or delete any user content; findings are advisory only.',
     'Return ONLY one JSON object matching this schema: ' + JSON.stringify({
@@ -149,7 +164,7 @@ export function buildAssistSystemPrompt(
       draft: { title: 'string', scenario: 'string', gap: 'string', desired: 'string', context: 'string' },
       privacyFindings: [{ kind: 'secret|personal-info|private-path|confidential|excess-context', severity: 'info|warning|critical', quote: 'string', reason: 'string' }],
     }),
-    'Instruction version: ' + instructionVersion,
+    'Instruction version: ' + INSTRUCTION_VERSION,
   ].join('\n');
 }
 
@@ -219,10 +234,24 @@ export async function assembleStreamText(stream: AsyncIterable<StreamChunk>): Pr
  * @returns the assist outcome.
  */
 export async function runAssist(deps: AssistDeps, input: AssistInput): Promise<AssistOutcome> {
-  const language = effectiveLanguage(input.language);
-  const systemText = buildAssistSystemPrompt(language, input.currentType);
-  const sourcesText = assembleSourcesText(input.sources);
-  const config = deps.resolveConfig(input.sessionId);
+  const envelope = envelopeOf(input);
+  const { sourcesText, systemText } = envelope;
+  let config: LlmCallConfig | undefined;
+  try {
+    config = deps.resolveConfig(input.sessionId);
+  } catch (error) {
+    // A config-resolution failure is a distinct model-call failure: the route
+    // must respond instead of hanging, and the user keeps manual control.
+    return {
+      status: 'model-failed',
+      code: 'MODEL_CONFIG_ERROR',
+      message: (error as Error).message,
+      provider: '',
+      model: '',
+      sourcesText,
+      systemText,
+    };
+  }
   if (config === undefined) {
     return { status: 'no-model-context', sourcesText, systemText };
   }
@@ -248,7 +277,7 @@ export async function runAssist(deps: AssistDeps, input: AssistInput): Promise<A
     return {
       status: 'repair-needed',
       rawText: assembled.text,
-      errors: ['the model response was truncated before it could be validated'],
+      errors: ['assist.error.truncated'],
       provider: config.provider,
       model: config.model,
       sourcesText,

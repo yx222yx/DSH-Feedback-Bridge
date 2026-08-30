@@ -286,6 +286,23 @@ test('workspace renders the advisory privacy panel for a credential marker witho
   assert.match(html, /the api key is sk-abcdef1234567890xyz/);
 });
 
+test('every assist error code and user-visible assist string is translated in both dictionaries', () => {
+  const en = moduleExports.dictionaries.en;
+  const zh = moduleExports.dictionaries.zh;
+  const codes = Object.keys(en).filter((key) => key.startsWith('assist.error.'));
+  assert.ok(codes.length >= 10, 'assist error codes must exist');
+  for (const code of codes) {
+    assert.ok(typeof en[code] === 'string' && en[code] !== '', code + ' in en');
+    assert.ok(typeof zh[code] === 'string' && zh[code] !== '', code + ' in zh');
+    assert.notEqual(en[code], code, code + ' must be translated, not echoed');
+    assert.notEqual(zh[code], code, code + ' must be translated, not echoed');
+  }
+  for (const key of ['assist.errorCode', 'assist.typeReason', 'assist.recommendedType']) {
+    assert.ok(typeof en[key] === 'string' && en[key] !== '', key);
+    assert.ok(typeof zh[key] === 'string' && zh[key] !== '', key);
+  }
+});
+
 test('feedback workspace guidance links to the official DSH Discussions destination', () => {
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), onClose: () => {} }, 'zh');
   assert.match(html, /data-testid="dsh-feedback-guidance"/);

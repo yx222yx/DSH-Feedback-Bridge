@@ -19,7 +19,11 @@ function readFixture(dshHome) {
     const mode = readFileSync(join(dir, 'mode'), 'utf8').trim();
     const text = readFileSync(join(dir, 'response.txt'), 'utf8');
     return { mode, text };
-  } catch {
+  } catch (error) {
+    // Missing or unreadable fixture files mean no scenario was staged; fall
+    // back to the default response. The acceptance test writes the files
+    // before each generation.
+    void error;
     return { mode: 'ok', text: '' };
   }
 }

@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
-import { FEEDBACK_TYPES, type FeedbackType } from './feedback-types.js';
+import { FEEDBACK_TYPES, type DraftLanguage, type FeedbackType } from './feedback-types.js';
 
 /** Five editable draft fields a persisted record must carry as strings. */
 export interface DraftFields {
@@ -15,9 +15,7 @@ export interface DraftFields {
 
 export type { FeedbackType } from './feedback-types.js';
 export { FEEDBACK_TYPES } from './feedback-types.js';
-
-/** Accepted submission languages; absence means the English default. */
-export type DraftLanguage = 'zh' | 'en';
+export type { DraftLanguage } from './feedback-types.js';
 
 /** Material class of one confirmed feedback source. */
 export type SourceKind = 'message' | 'tool-result' | 'diagnostic';
@@ -292,30 +290,42 @@ function normalizeRecord(record: unknown): StoredDraft | null {
     return { version: DRAFT_SCHEMA_VERSION, ...fields, sources: [], type: 'custom', updatedAt: candidate.updatedAt };
   }
   if (candidate.version === 2) {
+    let sources: ConfirmedSourceRecord[];
     try {
-      const sources = validateSources(candidate.sources);
-      return { version: DRAFT_SCHEMA_VERSION, ...fields, sources, type: 'custom', updatedAt: candidate.updatedAt };
-    } catch {
+      sources = validateSources(candidate.sources);
+    } catch (error) {
+      // validateSources rejects a malformed or oversized v2 sources array;
+      // nothing else can throw here, so the record is corrupt and quarantine
+      // in load handles it.
+      void error;
       return null;
     }
+    return { version: DRAFT_SCHEMA_VERSION, ...fields, sources, type: 'custom', updatedAt: candidate.updatedAt };
   }
   if (candidate.version !== DRAFT_SCHEMA_VERSION) return null;
+  let sources: ConfirmedSourceRecord[];
   try {
-    const sources = validateSources(candidate.sources);
-    assertFeedbackType(candidate.type);
-    assertLanguage(candidate.language);
-    const record: StoredDraft = {
-      version: DRAFT_SCHEMA_VERSION,
-      ...fields,
-      sources,
-      type: candidate.type,
-      updatedAt: candidate.updatedAt,
-    };
-    if (candidate.language !== undefined) record.language = candidate.language;
-    return record;
-  } catch {
+    sources = validateSources(candidate.sources);
+  } catch (error) {
+    // validateSources rejects a malformed or oversized sources array; nothing
+    // else can throw here, so the record is corrupt and quarantine in load
+    // handles it.
+    void error;
     return null;
   }
+  if (!(FEEDBACK_TYPES as readonly string[]).includes(candidate.type as string)) return null;
+  if (candidate.language !== undefined && candidate.language !== 'zh' && candidate.language !== 'en') return null;
+  const type = candidate.type as FeedbackType;
+  const language = candidate.language as DraftLanguage | undefined;
+  const stored: StoredDraft = {
+    version: DRAFT_SCHEMA_VERSION,
+    ...fields,
+    sources,
+    type,
+    updatedAt: candidate.updatedAt,
+  };
+  if (language !== undefined) stored.language = language;
+  return stored;
 }
 
 /**
