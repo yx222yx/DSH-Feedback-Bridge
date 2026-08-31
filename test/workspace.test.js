@@ -949,8 +949,11 @@ test('re-entering an identical intent after clearing it re-runs the similarity c
   assert.equal(calls, 1);
 
   // Clearing any intent field returns the panel to idle (the effect-driven
-  // state update is visible on the next render).
+  // state update is visible on the next render). The similarity panel lives
+  // in a dialog opened from the footer actions row.
   set('dsh-feedback-gap', '');
+  vnode = h.render(h.workspace);
+  findByTestId(vnode, 'dsh-feedback-similarity-open').props.onClick();
   vnode = h.render(h.workspace);
   assert.ok(findByTestId(vnode, 'dsh-feedback-similarity-idle'));
 

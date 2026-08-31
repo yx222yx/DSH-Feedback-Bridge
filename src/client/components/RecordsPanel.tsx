@@ -17,8 +17,7 @@ export interface RecordsPanelProps {
  */
 export function RecordsPanel({ t, records }: RecordsPanelProps): React.ReactElement {
   return (
-    <section className="dsh-feedback-records" data-testid="dsh-feedback-records">
-      <h3 className="dsh-feedback-section-title">{t('records.title')}</h3>
+    <section className="dsh-feedback-records">
       {records.length === 0 ? (
         <p className="dsh-feedback-hint" data-testid="dsh-feedback-records-empty">{t('records.empty')}</p>
       ) : (

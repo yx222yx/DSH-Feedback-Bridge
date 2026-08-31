@@ -7,10 +7,10 @@ DSH Feedback Bridge 是一个 DeepSeek Harness 插件，帮助你把插件需求
 ## 主要功能
 
 - 从 DSH Web 左侧栏的“社区反馈”进入。
-- 从当前对话中选择需要使用的消息和诊断信息。
-- 使用当前对话选择的模型协助整理反馈。
-- 查找可能相关的官方 Discussions、插件和文档。
-- 使用中文或英文编辑并预览最终内容。
+- 主界面直接呈现反馈文本编辑与预览；**反馈来源**和**模型辅助建议**是顶部按钮式入口，分别进入独立页面。
+- **反馈来源**按“一次完整交流”分组：以你的一句话开始、到模型完整输出结束（工具结果与报错并入该交流）作为一条可引用的来源，而不是逐条列出每次交互；支持筛选、确认、移除与引用到字段。
+- 每个字段文本框都较小，带**展开**按钮可进入大编辑页面。
+- 使用当前对话选择的模型协助整理反馈；**相似性检查**作为操作行按钮，点击弹出结果对话框。
 - 复制或导出准确的 Markdown 草稿。
 - 通过 GitHub 登录或本机 GitHub CLI 账号提交。
 - 每次提交前显示最终内容和 GitHub 账号，并要求明确确认。
@@ -44,23 +44,23 @@ dsh --profile web --no-open --port 3080
 安装指定版本：
 
 ```sh
-dsh plugin --profile web add dsh-feedback-bridge@0.1.0
+dsh plugin --profile web add dsh-feedback-bridge@0.1.3
 ```
 
-如果无法访问 npm，也可以从 [GitHub Releases](https://github.com/yx222yx/DSH-Feedback-Bridge/releases) 下载 `dsh-feedback-bridge-0.1.0.tgz`，然后运行：
+如果无法访问 npm，也可以从 [GitHub Releases](https://github.com/yx222yx/DSH-Feedback-Bridge/releases) 下载 `dsh-feedback-bridge-0.1.3.tgz`，然后运行：
 
 ```sh
-dsh plugin --profile web add ./dsh-feedback-bridge-0.1.0.tgz
+dsh plugin --profile web add ./dsh-feedback-bridge-0.1.3.tgz
 ```
 
 ## 使用方法
 
-1. 打开“社区反馈”。
-2. 填写反馈内容，或者选择当前对话中的相关信息。
-3. 根据需要使用模型整理内容并检查相似结果。
-4. 检查最终预览，删除不希望公开的信息。
-5. 复制或导出 Markdown 草稿，或者登录 GitHub 后直接提交。
-6. 直接提交前，再次确认公开内容和所使用的 GitHub 账号。
+1. 打开“社区反馈”，主界面是反馈文本编辑区与预览。
+2. 点顶部 **反馈来源** 进入来源页：来源按一次完整交流分组，可筛选、确认或移除；确认后引用到字段或直接填写。
+3. 点顶部 **模型辅助建议** 进入建议页，使用当前对话选择的模型生成建议（类型推荐、缺失信息、逐字段应用）。
+4. 填写或展开任一字段进入大编辑页；相似性检查在底部操作行，点击弹出结果对话框。
+5. 检查最终预览，删除不希望公开的信息。
+6. 复制或导出 Markdown 草稿，或者登录 GitHub 后直接提交；直接提交前再次确认公开内容和所使用的 GitHub 账号。
 
 插件只会向 `deepseek-ai/deepseek-harness` 官方 Discussions 提交，不会创建 GitHub Issue，也不会向其他仓库提交。
 
@@ -121,10 +121,10 @@ DSH Feedback Bridge is a DeepSeek Harness plugin for turning plugin requests, fe
 ### Features
 
 - Open “社区反馈” from the DSH Web sidebar.
-- Select relevant messages and diagnostic information from the current conversation.
-- Use the model already selected in the conversation to improve the draft.
-- Find possibly related official Discussions, plugins, and documentation.
-- Prepare and preview feedback in Chinese or English.
+- The main view shows the feedback text editing and preview directly; **Feedback sources** and **Model-assisted suggestions** are button entries at the top that open their own pages.
+- **Feedback sources** are grouped as one full exchange: from your prompt through the model's complete reply (tool results and errors folded in) is one citable source, instead of listing every interaction row; they can be filtered, confirmed, removed, and quoted into fields.
+- Every field is compact with an **expand** button that opens a large editing page.
+- Use the model already selected in the conversation to improve the draft; **Similarity check** is an action-row button that opens a results dialog.
 - Copy or export the exact Markdown draft.
 - Submit through GitHub Device Flow or an existing GitHub CLI login.
 - Review the final content and GitHub account before every submission.
@@ -158,23 +158,23 @@ Open DSH Web and select “社区反馈” from the sidebar.
 To install a specific version:
 
 ```sh
-dsh plugin --profile web add dsh-feedback-bridge@0.1.0
+dsh plugin --profile web add dsh-feedback-bridge@0.1.3
 ```
 
-If npm is unavailable, download `dsh-feedback-bridge-0.1.0.tgz` from [GitHub Releases](https://github.com/yx222yx/DSH-Feedback-Bridge/releases) and run:
+If npm is unavailable, download `dsh-feedback-bridge-0.1.3.tgz` from [GitHub Releases](https://github.com/yx222yx/DSH-Feedback-Bridge/releases) and run:
 
 ```sh
-dsh plugin --profile web add ./dsh-feedback-bridge-0.1.0.tgz
+dsh plugin --profile web add ./dsh-feedback-bridge-0.1.3.tgz
 ```
 
 ### Use
 
-1. Open “社区反馈”.
-2. Enter the feedback or select relevant information from the current conversation.
-3. Optionally use the selected model to improve the draft and check related results.
-4. Review the final preview and remove anything you do not want to publish.
-5. Copy or export the Markdown, or sign in to GitHub and submit it directly.
-6. Before direct submission, confirm the public content and GitHub account again.
+1. Open “社区反馈”; the main view is the feedback text editing area with a live preview.
+2. Open **Feedback sources** from the top entry: sources are grouped as one full exchange per prompt, filterable, and can be confirmed, removed, or quoted into fields.
+3. Open **Model-assisted suggestions** from the top entry to generate suggestions (type recommendation, missing-info notes, per-field apply) with the conversation's selected model.
+4. Fill the fields or expand any field into a large editing page; run the **Similarity check** from the footer actions to open the results dialog.
+5. Review the final preview and remove anything you do not want to publish.
+6. Copy or export the Markdown, or sign in to GitHub and submit it directly; before direct submission, confirm the public content and GitHub account again.
 
 The plugin submits only to the official `deepseek-ai/deepseek-harness` Discussions. It does not create GitHub Issues or submit to other repositories.
 

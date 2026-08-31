@@ -64,8 +64,7 @@ export function SourcePanel({
   const confirmedIds = new Set(confirmed.map((record) => record.id));
   const isEmpty = candidates.length === 0 && confirmed.length === 0;
   return (
-    <section className="dsh-feedback-sources" data-testid="dsh-feedback-sources">
-      <h3 className="dsh-feedback-section-title">{t('sources.title')}</h3>
+    <section className="dsh-feedback-sources">
       {isEmpty ? (
         <p className="dsh-feedback-sources-empty" data-testid="dsh-feedback-sources-empty">
           {noSession ? t('sources.noSession') : t('sources.empty')}
@@ -87,7 +86,7 @@ export function SourcePanel({
                   return (
                     <li key={candidate.id} className={rowClass} data-testid={'dsh-feedback-source-' + candidate.id}>
                       <div className="dsh-feedback-source-head">
-                        <span className="dsh-feedback-source-role">{t(ROLE_LABEL_KEYS[candidate.role])}</span>
+                        <span className="dsh-feedback-source-role">{candidate.exchange === true ? t('sources.exchange') : t(ROLE_LABEL_KEYS[candidate.role])}</span>
                         {candidate.recommended && !isConfirmed ? (
                           <span className="dsh-feedback-source-badge dsh-feedback-source-badge-recommended" data-testid="dsh-feedback-source-recommended">
                             {t('sources.recommended')} · {t(REASON_LABEL_KEYS[candidate.recommendReason ?? 'error'])}

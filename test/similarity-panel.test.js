@@ -63,7 +63,7 @@ function result(overrides = {}) {
 
 test('SimilarityPanel shows the idle hint until the minimum intent exists', () => {
   const { html } = renderPanel({ phase: 'idle' });
-  assert.match(html, /data-testid="dsh-feedback-similarity"/);
+  assert.match(html, /class="dsh-feedback-similarity"/);
   assert.match(html, /data-testid="dsh-feedback-similarity-idle"/);
   assert.match(html, /Similar results appear after the scenario/);
   assert.doesNotMatch(html, /dsh-feedback-similarity-list/);

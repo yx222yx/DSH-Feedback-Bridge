@@ -253,11 +253,13 @@ test('feedback workspace renders the five editable fields, type badge, preview a
   assert.match(html, /aria-label="关闭"/);
 });
 
-test('workspace shows the similarity hint until the minimum feedback intent is present', () => {
+test('workspace exposes the similarity check as an action-row button; the panel opens in a dialog', () => {
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(moduleExports.emptyFeedbackDraft()), persistence: persistenceStub(), onClose: () => {} }, 'zh');
-  assert.match(html, /data-testid="dsh-feedback-similarity"/);
-  assert.match(html, /data-testid="dsh-feedback-similarity-idle"/);
-  assert.match(html, /填写场景、问题与期望结果后，将自动查找相似结果。/);
+  // The similarity check lives in the footer actions row.
+  assert.match(html, /data-testid="dsh-feedback-similarity-open"/);
+  assert.match(html, />相似性检查<\/button>/);
+  // The panel itself renders only once the dialog is opened.
+  assert.doesNotMatch(html, /dsh-feedback-similarity-idle/);
 });
 
 test('workspace renders the assist control disabled until a session and confirmed sources exist', () => {
@@ -345,7 +347,9 @@ test('workspace with an open conversation lists candidate sources with recommend
   ]);
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), conversation, onClose: () => {} }, 'zh');
 
-  assert.match(html, /data-testid="dsh-feedback-sources"/);
+  // Sources live on their own view with an entry button on the main view.
+  assert.match(html, /data-testid="dsh-feedback-open-sources"/);
+  assert.match(html, /data-testid="dsh-feedback-view-sources"/);
   assert.match(html, /候选来源/);
   assert.match(html, /已确认来源/);
   // Session diagnostics candidate on top.
@@ -366,11 +370,11 @@ test('workspace with an open conversation lists candidate sources with recommend
 test('workspace confirmed sources render the confirmed state, remove and quote-to-field controls', () => {
   const draft = moduleExports.emptyFeedbackDraft();
   const record = {
-    id: 'session-1:node:user:1',
+    id: 'session-1:exchange:1',
     sessionId: 'session-1',
     kind: 'message',
     role: 'user',
-    label: '用户消息',
+    label: '完整交流',
     text: 'SENTINEL_CONFIRMED 已确认内容',
     truncated: false,
     sensitive: false,
@@ -380,8 +384,8 @@ test('workspace confirmed sources render the confirmed state, remove and quote-t
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft, [record]), persistence: persistenceStub(), conversation, onClose: () => {} }, 'zh');
 
   // The confirmed panel lists the record with its captured label and text.
-  assert.match(html, /data-testid="dsh-feedback-confirmed-session-1:node:user:1"/);
-  assert.match(html, /用户消息/);
+  assert.match(html, /data-testid="dsh-feedback-confirmed-session-1:exchange:1"/);
+  assert.match(html, /完整交流/);
   assert.match(html, /SENTINEL_CONFIRMED 已确认内容/);
   // Quote-to-field select offers the four public fields.
   assert.match(html, /data-testid="dsh-feedback-source-quote"/);
@@ -393,10 +397,10 @@ test('workspace confirmed sources render the confirmed state, remove and quote-t
   assert.match(html, /data-testid="dsh-feedback-source-remove"/);
 });
 
-test('workspace without a conversation shows the no-session empty state', () => {
+test('workspace without a conversation shows the no-session empty state on the sources view', () => {
   const draft = moduleExports.emptyFeedbackDraft();
   const html = renderComponent(moduleExports.FeedbackWorkspace, { sessions: sessionsWith(draft), persistence: persistenceStub(), conversation: null, onClose: () => {} }, 'zh');
-  assert.match(html, /data-testid="dsh-feedback-sources"/);
+  assert.match(html, /data-testid="dsh-feedback-view-sources"/);
   assert.match(html, /data-testid="dsh-feedback-sources-empty"/);
   assert.match(html, /当前没有打开的会话/);
 });
@@ -445,8 +449,7 @@ const RECORD_FIXTURE = {
 
 test('records panel lists a stored record with the saved Discussion URL opening in a new tab', () => {
   const html = renderComponent(moduleExports.RecordsPanel, { records: [RECORD_FIXTURE] }, 'zh');
-  assert.match(html, /data-testid="dsh-feedback-records"/);
-  assert.match(html, /提交记录/);
+  assert.match(html, /class="dsh-feedback-records"/);
   assert.match(html, /data-testid="dsh-feedback-record-record-1"/);
   assert.match(html, /href="https:\/\/github\.com\/deepseek-ai\/deepseek-harness\/discussions\/4242"/);
   assert.match(html, /target="_blank"/);
@@ -460,7 +463,7 @@ test('records panel lists a stored record with the saved Discussion URL opening 
 
 test('records panel renders the English no-tracking notice and labels in English', () => {
   const html = renderComponent(moduleExports.RecordsPanel, { records: [RECORD_FIXTURE] }, 'en');
-  assert.match(html, /Submission records/);
+  assert.match(html, /class="dsh-feedback-records"/);
   assert.match(html, /Submitted as: fake-user/);
   assert.match(html, /Submitted at:/);
   assert.match(html, /v0\.1 does not track replies, edits, resolution, or other remote status/);
@@ -468,7 +471,7 @@ test('records panel renders the English no-tracking notice and labels in English
 
 test('records panel renders an empty state when no records exist', () => {
   const html = renderComponent(moduleExports.RecordsPanel, { records: [] }, 'zh');
-  assert.match(html, /data-testid="dsh-feedback-records"/);
+  assert.match(html, /class="dsh-feedback-records"/);
   assert.match(html, /data-testid="dsh-feedback-records-empty"/);
   assert.match(html, /暂无提交记录/);
   assert.doesNotMatch(html, /dsh-feedback-records-list/);

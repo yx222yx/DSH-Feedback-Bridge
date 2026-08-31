@@ -128,7 +128,7 @@ test('host registers the status and draft routes through webServer and disposes 
     const payload = JSON.parse(response.body);
     assert.equal(payload.name, 'DSH Feedback Bridge');
     assert.equal(payload.status, 'loaded');
-    assert.equal(payload.version, '0.1.0');
+    assert.equal(payload.version, '0.1.3');
     assert.equal(payload.dshVersion, '0.1.1-rc.2');
     assert.equal(payload.compatible, true);
 

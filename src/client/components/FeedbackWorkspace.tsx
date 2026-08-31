@@ -100,6 +100,48 @@ function useConversationRead(source: ConversationSource | null | undefined): Con
  * that would overwrite a newer edit asks first. No action here performs a
  * GitHub write or any external network request.
  */
+/** Props of one collapsible auxiliary section. */
+interface CollapsibleSectionProps {
+  t: T;
+  title: string;
+  /** Optional compact right-aligned hint shown beside the title. */
+  summary?: string;
+  /** Base testid; the toggle gets -toggle and the body keeps the base id. */
+  testid: string;
+  open: boolean;
+  onToggle(): void;
+  /** The section body; passed as a named prop so render-level test doubles that do not thread JSX children through props keep working. */
+  content: React.ReactNode;
+}
+
+/**
+ * Collapsible auxiliary section: a compact header row (title, optional
+ * summary, chevron) that toggles the body. The body stays in the DOM and is
+ * hidden via the hidden attribute so its state and effects keep running
+ * while collapsed, and so render-level tests keep finding its content.
+ */
+function CollapsibleSection({ t, title, summary, testid, open, onToggle, content }: CollapsibleSectionProps): React.ReactElement {
+  return (
+    <section className="dsh-feedback-section" data-testid={testid + '-section'}>
+      <button
+        type="button"
+        className="dsh-feedback-section-header"
+        data-testid={testid + '-toggle'}
+        aria-expanded={open}
+        aria-label={open ? t('section.collapse') : t('section.expand')}
+        onClick={onToggle}
+      >
+        <span className="dsh-feedback-section-header-title">{title}</span>
+        {summary !== undefined ? <span className="dsh-feedback-section-header-summary">{summary}</span> : null}
+        <span className="dsh-feedback-section-header-chevron" aria-hidden="true">{open ? '\u25be' : '\u25b8'}</span>
+      </button>
+      <div className="dsh-feedback-section-body" data-testid={testid} hidden={!open}>
+        {content}
+      </div>
+    </section>
+  );
+}
+
 export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, similarityTransport, submissionTransport, recordsTransport, oauthTransport, conversation, onClose }: FeedbackWorkspaceProps): React.ReactElement {
   const [fields, setFields] = React.useState<FeedbackDraft>(() => ({ ...sessions.openOrResume() }));
   const [sources, setSources] = React.useState<ConfirmedSourceRecord[]>(() => sessions.getSources());
@@ -120,6 +162,13 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
   const [submission, setSubmission] = React.useState<SubmissionPanelState>({ phase: 'preparing' });
   const [submissionCategory, setSubmissionCategory] = React.useState('');
   const [records, setRecords] = React.useState<SubmissionRecord[]>([]);
+  // Multi-view navigation: the draft fields are the main body; sources and
+  // model suggestions open as separate pages, fields expand into full editors,
+  // and the similarity check opens from the footer actions.
+  const [view, setView] = React.useState<'main' | 'sources' | 'assist' | FeedbackFieldKey>('main');
+  const [sourceFilter, setSourceFilter] = React.useState('');
+  const [similarityOpen, setSimilarityOpen] = React.useState(false);
+  const [openRecords, setOpenRecords] = React.useState(false);
   const seqRef = React.useRef(0);
   const controllerRef = React.useRef<AbortController | null>(null);
   const searchedRef = React.useRef<string | null>(null);
@@ -150,6 +199,12 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
     diagSession: t('sources.diag.session'),
     turnMaxTokens: t('sources.diag.turnMaxTokens'),
     errorCode: t('sources.diag.errorCode'),
+    roleUser: t('sources.role.user'),
+    roleAssistant: t('sources.role.assistant'),
+    roleTool: t('sources.role.tool'),
+    roleError: t('sources.role.error'),
+    roleSteering: t('sources.role.steering'),
+    roleContext: t('sources.role.context'),
   };
   const candidates: FeedbackSourceCandidate[] = conversationRead === undefined
     ? []
@@ -161,6 +216,10 @@ export function FeedbackWorkspace({ t, sessions, persistence, assistTransport, s
         dshVersion,
         copy: sourceCopy,
       }));
+  const query = sourceFilter.trim().toLowerCase();
+  const filteredCandidates = query === ''
+    ? candidates
+    : candidates.filter((candidate) => candidate.fullText.toLowerCase().includes(query));
   const headings = {
     scenario: t('field.scenario'),
     gap: t('field.gap'),
@@ -513,7 +572,7 @@ const OAUTH_POLL_MS = 1000;
   /** Confirm a candidate: capture the reviewed snapshot and persist it. */
   const handleConfirm = (candidate: FeedbackSourceCandidate) => {
     userInteractedRef.current = true;
-    const record = confirmSourceCandidate(candidate, new Date().toISOString(), t(ROLE_LABEL_KEYS[candidate.role]));
+    const record = confirmSourceCandidate(candidate, new Date().toISOString(), candidate.exchange === true ? t('sources.exchange') : t(ROLE_LABEL_KEYS[candidate.role]));
     const next = [...sourcesRef.current, record];
     setSources(next);
     sessions.setSources(next);
@@ -824,21 +883,88 @@ const OAUTH_POLL_MS = 1000;
           </button>
         </header>
         <div className="dsh-feedback-body">
-          <SourcePanel
-            t={t}
-            candidates={candidates}
-            confirmed={sources}
-            expanded={expanded}
-            noSession={conversationRead === undefined}
-            currentSessionId={conversationRead?.sessionId ?? null}
-            onToggleExpand={toggleExpand}
-            onConfirm={handleConfirm}
-            onRemove={handleRemove}
-            onQuote={handleQuote}
-          />
-          <SimilarityPanel t={t} state={similarity} onRetry={retrySimilarity} />
-          <section className="dsh-feedback-assist" data-testid="dsh-feedback-assist">
-            <h3 className="dsh-feedback-section-title">{t('assist.title')}</h3>
+          <div className="dsh-feedback-view" data-testid="dsh-feedback-view-main" hidden={view !== 'main'}>
+            <div className="dsh-feedback-entry-row">
+              <button type="button" className="dsh-feedback-entry" data-testid="dsh-feedback-open-sources" onClick={() => setView('sources')}>
+                {t('sources.title')}
+                <span className="dsh-feedback-entry-count">{sources.length}/{candidates.length}</span>
+              </button>
+              <button type="button" className="dsh-feedback-entry" data-testid="dsh-feedback-open-assist" onClick={() => setView('assist')}>
+                {t('assist.title')}
+              </button>
+            </div>
+            <div className="dsh-feedback-edit-row">
+            <form className="dsh-feedback-form" onSubmit={(event) => event.preventDefault()}>
+              <label className="dsh-feedback-field" htmlFor="dsh-feedback-title">
+                <span className="dsh-feedback-field-label">{t('field.title')}</span>
+                {renderField('title', 'dsh-feedback-title')}
+                <button type="button" className="dsh-feedback-field-expand" data-testid="dsh-feedback-expand-title" onClick={() => setView('title')}>{t('field.expand')}</button>
+              </label>
+              <label className="dsh-feedback-field" htmlFor="dsh-feedback-scenario">
+                <span className="dsh-feedback-field-label">{t('field.scenario')}</span>
+                {renderField('scenario', 'dsh-feedback-scenario', 'textarea')}
+                <button type="button" className="dsh-feedback-field-expand" data-testid="dsh-feedback-expand-scenario" onClick={() => setView('scenario')}>{t('field.expand')}</button>
+              </label>
+              <label className="dsh-feedback-field" htmlFor="dsh-feedback-gap">
+                <span className="dsh-feedback-field-label">{t('field.gap')}</span>
+                {renderField('gap', 'dsh-feedback-gap', 'textarea')}
+                <button type="button" className="dsh-feedback-field-expand" data-testid="dsh-feedback-expand-gap" onClick={() => setView('gap')}>{t('field.expand')}</button>
+              </label>
+              <label className="dsh-feedback-field" htmlFor="dsh-feedback-desired">
+                <span className="dsh-feedback-field-label">{t('field.desired')}</span>
+                {renderField('desired', 'dsh-feedback-desired', 'textarea')}
+                <button type="button" className="dsh-feedback-field-expand" data-testid="dsh-feedback-expand-desired" onClick={() => setView('desired')}>{t('field.expand')}</button>
+              </label>
+              <label className="dsh-feedback-field" htmlFor="dsh-feedback-context">
+                <span className="dsh-feedback-field-label">{t('field.context')}</span>
+                {renderField('context', 'dsh-feedback-context', 'textarea')}
+                <button type="button" className="dsh-feedback-field-expand" data-testid="dsh-feedback-expand-context" onClick={() => setView('context')}>{t('field.expand')}</button>
+              </label>
+            </form>
+            <section className="dsh-feedback-review" aria-label={t('preview.title')}>
+              <h3 className="dsh-feedback-section-title">{t('preview.title')}</h3>
+              <pre className="dsh-feedback-preview" data-testid="dsh-feedback-preview">{markdown}</pre>
+            </section>
+            </div>
+            {allFindings.length > 0 ? (
+              <section className="dsh-feedback-privacy" data-testid="dsh-feedback-privacy">
+                <h3 className="dsh-feedback-section-title">{t('privacy.title')}</h3>
+                <ul className="dsh-feedback-privacy-list">
+                  {allFindings.map((finding) => (
+                    <li key={finding.id} className={'dsh-feedback-privacy-' + finding.severity} data-testid="dsh-feedback-privacy-finding">
+                      <span className="dsh-feedback-privacy-severity">{t(('privacy.severity.' + finding.severity) as import('../types.js').FeedbackBridgeKey)}</span>
+                      {t(('privacy.kind.' + finding.kind) as import('../types.js').FeedbackBridgeKey)} — {finding.excerpt}{finding.reasonKey !== undefined ? ' ' + t(finding.reasonKey) : ''}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+          </div>
+          <div className="dsh-feedback-view" data-testid="dsh-feedback-view-sources" hidden={view !== 'sources'}>
+            <div className="dsh-feedback-view-header">
+              <button type="button" className="dsh-feedback-view-back" data-testid="dsh-feedback-sources-back" onClick={() => setView('main')}>{t('view.back')}</button>
+              <h3 className="dsh-feedback-view-title">{t('sources.title')}</h3>
+            </div>
+            <input className="dsh-feedback-filter" data-testid="dsh-feedback-source-filter" placeholder={t('sources.filterPlaceholder')} value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} />
+            <SourcePanel
+              t={t}
+              candidates={filteredCandidates}
+              confirmed={sources}
+              expanded={expanded}
+              noSession={conversationRead === undefined}
+              currentSessionId={conversationRead?.sessionId ?? null}
+              onToggleExpand={toggleExpand}
+              onConfirm={handleConfirm}
+              onRemove={handleRemove}
+              onQuote={handleQuote}
+            />
+          </div>
+          <div className="dsh-feedback-view" data-testid="dsh-feedback-view-assist" hidden={view !== 'assist'}>
+            <div className="dsh-feedback-view-header">
+              <button type="button" className="dsh-feedback-view-back" data-testid="dsh-feedback-assist-back" onClick={() => setView('main')}>{t('view.back')}</button>
+              <h3 className="dsh-feedback-view-title">{t('assist.title')}</h3>
+            </div>
+            <div className="dsh-feedback-assist">
             <div className="dsh-feedback-assist-actions">
               <button
                 type="button"
@@ -922,51 +1048,24 @@ const OAUTH_POLL_MS = 1000;
                 </div>
               </div>
             ) : null}
-          </section>
-          {allFindings.length > 0 ? (
-            <section className="dsh-feedback-privacy" data-testid="dsh-feedback-privacy">
-              <h3 className="dsh-feedback-section-title">{t('privacy.title')}</h3>
-              <ul className="dsh-feedback-privacy-list">
-                {allFindings.map((finding) => (
-                  <li key={finding.id} className={'dsh-feedback-privacy-' + finding.severity} data-testid="dsh-feedback-privacy-finding">
-                    <span className="dsh-feedback-privacy-severity">{t(('privacy.severity.' + finding.severity) as import('../types.js').FeedbackBridgeKey)}</span>
-                    {t(('privacy.kind.' + finding.kind) as import('../types.js').FeedbackBridgeKey)} — {finding.excerpt}{finding.reasonKey !== undefined ? ' ' + t(finding.reasonKey) : ''}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-          <div className="dsh-feedback-edit-row">
-          <form className="dsh-feedback-form" onSubmit={(event) => event.preventDefault()}>
-            <label className="dsh-feedback-field" htmlFor="dsh-feedback-title">
-              <span className="dsh-feedback-field-label">{t('field.title')}</span>
-              {renderField('title', 'dsh-feedback-title')}
-            </label>
-            <label className="dsh-feedback-field" htmlFor="dsh-feedback-scenario">
-              <span className="dsh-feedback-field-label">{t('field.scenario')}</span>
-              {renderField('scenario', 'dsh-feedback-scenario', 'textarea')}
-            </label>
-            <label className="dsh-feedback-field" htmlFor="dsh-feedback-gap">
-              <span className="dsh-feedback-field-label">{t('field.gap')}</span>
-              {renderField('gap', 'dsh-feedback-gap', 'textarea')}
-            </label>
-            <label className="dsh-feedback-field" htmlFor="dsh-feedback-desired">
-              <span className="dsh-feedback-field-label">{t('field.desired')}</span>
-              {renderField('desired', 'dsh-feedback-desired', 'textarea')}
-            </label>
-            <label className="dsh-feedback-field" htmlFor="dsh-feedback-context">
-              <span className="dsh-feedback-field-label">{t('field.context')}</span>
-              {renderField('context', 'dsh-feedback-context', 'textarea')}
-            </label>
-          </form>
-          <section className="dsh-feedback-review" aria-label={t('preview.title')}>
-            <h3 className="dsh-feedback-section-title">{t('preview.title')}</h3>
-            <pre className="dsh-feedback-preview" data-testid="dsh-feedback-preview">{markdown}</pre>
-          </section>
+            </div>
           </div>
+          {FIELD_KEYS.map((key) => (
+            <div key={key} className="dsh-feedback-view" data-testid={'dsh-feedback-view-' + key} hidden={view !== key}>
+              <div className="dsh-feedback-view-header">
+                <button type="button" className="dsh-feedback-view-back" data-testid={'dsh-feedback-back-' + key} onClick={() => setView('main')}>{t('view.back')}</button>
+                <h3 className="dsh-feedback-view-title">{t(('field.' + key) as import('../types.js').FeedbackBridgeKey)}</h3>
+              </div>
+              <textarea className="dsh-feedback-field-full" data-testid={'dsh-feedback-full-' + key} value={fields[key]} onChange={setField(key)} rows={16} />
+            </div>
+          ))}
+
         </div>
         <footer className="dsh-feedback-footer">
           <div className="dsh-feedback-actions">
+            <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-similarity-open" onClick={() => setSimilarityOpen(true)}>
+              {t('similarity.title')}
+            </button>
             {submissionTransport !== undefined ? (
               <button type="button" className="dsh-feedback-action dsh-feedback-action-primary" data-testid="dsh-feedback-submission-open" disabled={!canExport || submissionOpen} onClick={openSubmission}>
                 {t('submission.submit')}
@@ -990,7 +1089,9 @@ const OAUTH_POLL_MS = 1000;
           {!canExport ? (
             <p className="dsh-feedback-hint" data-testid="dsh-feedback-hint">{t('status.needTitle')}</p>
           ) : null}
-          {recordsTransport !== undefined ? <RecordsPanel t={t} records={records} /> : null}
+          {recordsTransport !== undefined ? (
+            <CollapsibleSection t={t} title={t('records.title')} summary={records.length > 0 ? String(records.length) : undefined} testid="dsh-feedback-records" open={openRecords} onToggle={() => setOpenRecords(!openRecords)} content={<RecordsPanel t={t} records={records} />} />
+          ) : null}
           <section className="dsh-feedback-guidance" data-testid="dsh-feedback-guidance">
             <h3 className="dsh-feedback-section-title">{t('guidance.title')}</h3>
             <p className="dsh-feedback-destination">
@@ -1013,6 +1114,20 @@ const OAUTH_POLL_MS = 1000;
             </ol>
           </section>
         </footer>
+        {similarityOpen ? (
+          <div className="dsh-feedback-similarity-overlay" data-testid="dsh-feedback-similarity-dialog" role="dialog" aria-modal="true" aria-label={t('similarity.title')}>
+            <div className="dsh-feedback-similarity-mask" onClick={() => setSimilarityOpen(false)} aria-hidden="true" />
+            <div className="dsh-feedback-similarity-dialog">
+              <h3 className="dsh-feedback-section-title">{t('similarity.title')}</h3>
+              <SimilarityPanel t={t} state={similarity} onRetry={retrySimilarity} />
+              <div className="dsh-feedback-similarity-actions">
+                <button type="button" className="dsh-feedback-action" data-testid="dsh-feedback-similarity-close" onClick={() => setSimilarityOpen(false)}>
+                  {t('action.close')}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
         {confirmDiscard ? (
           <div className="dsh-feedback-confirm" data-testid="dsh-feedback-discard-confirm" role="alertdialog" aria-modal="true" aria-label={t('discard.title')}>
             <p className="dsh-feedback-confirm-title">{t('discard.title')}</p>

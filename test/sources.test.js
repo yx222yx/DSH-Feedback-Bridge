@@ -69,6 +69,12 @@ function zhCopy() {
     diagSession: '会话 ID：',
     turnMaxTokens: '该回合达到了输出 token 上限',
     errorCode: 'code: ',
+    roleUser: '用户消息',
+    roleAssistant: '模型回复',
+    roleTool: '工具结果',
+    roleError: '运行错误',
+    roleSteering: '指令',
+    roleContext: '上下文',
   };
 }
 
@@ -81,6 +87,12 @@ function enCopy() {
     diagSession: 'Session ID: ',
     turnMaxTokens: 'The turn reached the output token cap.',
     errorCode: 'code: ',
+    roleUser: 'User',
+    roleAssistant: 'Assistant',
+    roleTool: 'Tool result',
+    roleError: 'Run error',
+    roleSteering: 'Steering',
+    roleContext: 'Context',
   };
 }
 
@@ -96,7 +108,7 @@ function derivationContext(overrides = {}) {
   };
 }
 
-test('deriveSourceCandidates turns conversation nodes into candidates newest-first with a session diagnostics block on top', () => {
+test('deriveSourceCandidates groups conversation nodes into full exchanges newest-first with a session diagnostics block on top', () => {
   const candidates = moduleExports.deriveSourceCandidates(openSnapshot([
     userNode(1, [textBlock('第一条用户消息')]),
     assistantNode(2, [{ kind: 'text', text: '第一条回复' }]),
@@ -104,34 +116,49 @@ test('deriveSourceCandidates turns conversation nodes into candidates newest-fir
     toolResultNode(4, 'call-9', [textBlock('SENTINEL_DIAG_RAW 工具输出')], { isError: true }),
   ]), derivationContext());
 
-  assert.equal(candidates.length, 5);
+  // One exchange per user prompt: [user1 + assistant2] and [user3 + tool4].
+  assert.equal(candidates.length, 3);
   assert.equal(candidates[0].role, 'session');
   assert.equal(candidates[0].id, 'session-1:session:meta');
   assert.match(candidates[0].fullText, /标题：我的会话/);
   assert.match(candidates[0].fullText, /DSH 版本：0\.1\.1-rc\.2/);
   assert.match(candidates[0].fullText, /会话 ID：session-1/);
-  assert.equal(candidates[1].role, 'tool');
-  assert.equal(candidates[1].id, 'session-1:tool:call-9');
+  // Newest exchange first, with the tool error folded into its exchange.
+  assert.equal(candidates[1].id, 'session-1:exchange:3');
+  assert.equal(candidates[1].role, 'user');
+  assert.equal(candidates[1].exchange, true);
+  assert.equal(candidates[1].errorSource, 'tool');
+  assert.match(candidates[1].fullText, /SENTINEL_REVIEWED/);
   assert.match(candidates[1].fullText, /SENTINEL_DIAG_RAW/);
-  assert.equal(candidates[2].role, 'user');
-  assert.match(candidates[2].fullText, /SENTINEL_REVIEWED/);
-  assert.equal(candidates[3].role, 'assistant');
-  assert.equal(candidates[3].fullText, '第一条回复');
-  assert.equal(candidates[4].role, 'user');
-  assert.equal(candidates[4].fullText, '第一条用户消息');
+  // Older exchange carries the user prompt plus the assistant reply.
+  assert.equal(candidates[2].id, 'session-1:exchange:1');
+  assert.match(candidates[2].fullText, /第一条用户消息/);
+  assert.match(candidates[2].fullText, /第一条回复/);
+  assert.equal(candidates[2].exchange, true);
 });
 
 
 
-test('deriveSourceCandidates renders diagnostics and error text with the locale-owned copy', () => {
-  const zh = moduleExports.deriveSourceCandidates(openSnapshot([
+test('deriveSourceCandidates renders diagnostics and folds turn errors into their exchange with the locale-owned copy', () => {
+  // Turn errors without a user prompt are not citable exchanges; the
+  // diagnostics block still carries the session facts.
+  const orphan = moduleExports.deriveSourceCandidates(openSnapshot([
     turnErrorNode(1, 'Provider request failed', { code: 'MISSING_CREDENTIAL' }),
     { kind: 'turn-max-tokens', seq: 2, time: 2000, turn: 1, step: 1 },
   ]), derivationContext());
-  const zhError = zh.find((c) => c.itemId === 'error:1');
-  assert.match(zhError.fullText, /Provider request failed/);
-  assert.match(zhError.fullText, /code: MISSING_CREDENTIAL/);
-  assert.equal(zh.find((c) => c.itemId === 'error:2').fullText, '该回合达到了输出 token 上限');
+  assert.equal(orphan.length, 0, 'orphaned errors are not citable sources');
+
+  // With a user prompt, the errors fold into the exchange text.
+  const zh = moduleExports.deriveSourceCandidates(openSnapshot([
+    userNode(1, [textBlock('出发')]),
+    turnErrorNode(2, 'Provider request failed', { code: 'MISSING_CREDENTIAL' }),
+    { kind: 'turn-max-tokens', seq: 3, time: 3000, turn: 1, step: 1 },
+  ]), derivationContext());
+  const zhExchange = zh.find((c) => c.exchange === true);
+  assert.match(zhExchange.fullText, /Provider request failed/);
+  assert.match(zhExchange.fullText, /code: MISSING_CREDENTIAL/);
+  assert.match(zhExchange.fullText, /该回合达到了输出 token 上限/);
+  assert.equal(zhExchange.errorSource, 'turn');
 
   const en = moduleExports.deriveSourceCandidates(openSnapshot([
     userNode(1, [textBlock('a message')]),
@@ -152,15 +179,15 @@ test('deriveSourceCandidates extracts only text blocks and returns no candidates
     { kind: 'compaction', seq: 3, time: 3000, summary: '压缩摘要', summaryEventSeq: null, shadowedItemCount: null, shadowedTokenCount: null },
   ];
   const candidates = moduleExports.deriveSourceCandidates(openSnapshot(nodes), derivationContext());
-  assert.equal(candidates.length, 2); // the user message plus the session diagnostics block
-  assert.equal(candidates[1].fullText, '可见文本');
+  assert.equal(candidates.length, 2); // one exchange plus the session diagnostics block
+  assert.match(candidates[1].fullText, /可见文本/);
   assert.doesNotMatch(candidates[1].fullText, /思维链|rm -rf/);
 
   assert.deepEqual(moduleExports.deriveSourceCandidates({ nodes, openState: 'loading' }, derivationContext()), []);
   assert.deepEqual(moduleExports.deriveSourceCandidates({ nodes: [], openState: 'open' }, derivationContext()), []);
 });
 
-test('applyRecommendations flags the latest user message, defect-keyword content, error signals and the session block', () => {
+test('applyRecommendations flags the latest exchange, defect-keyword content, error signals and the session block', () => {
   const candidates = moduleExports.deriveSourceCandidates(openSnapshot([
     userNode(1, [textBlock('普通的中段消息')]),
     userNode(2, [textBlock('我遇到一个 error 报错')]),
@@ -174,28 +201,28 @@ test('applyRecommendations flags the latest user message, defect-keyword content
   // Session diagnostics is always recommended.
   assert.equal(byId['session-1:session:meta'].recommended, true);
   assert.equal(byId['session-1:session:meta'].recommendReason, 'session');
-  // Latest user/steering message.
-  assert.equal(byId['session-1:node:user:2'].recommended, true);
-  assert.equal(byId['session-1:node:user:2'].recommendReason, 'recent');
-  // Keyword content.
-  assert.equal(byId['session-1:node:user:2'].recommended, true);
-  // Error tool result (isError).
-  assert.equal(byId['session-1:node:user:1'].recommended, false);
-  // Turn error.
-  assert.equal(byId['session-1:error:4'].recommended, true);
-  assert.equal(byId['session-1:error:4'].recommendReason, 'turn-error');
-  // Non-error tool result and plain message stay unrecommended.
-  assert.equal(byId['session-1:tool:call-1'].recommended, false);
+  // The latest exchange (user2 + tool + turn error) is the recent one.
+  assert.equal(byId['session-1:exchange:2'].recommended, true);
+  assert.equal(byId['session-1:exchange:2'].recommendReason, 'recent');
+  // The older plain exchange stays unrecommended.
+  assert.equal(byId['session-1:exchange:1'].recommended, false);
 });
 
-test('error-signal tool results are recommended with the tool-error reason', () => {
+test('error-signal tool results are recommended with the tool-error reason on their exchange', () => {
   const candidates = moduleExports.deriveSourceCandidates(openSnapshot([
-    toolResultNode(1, 'call-7', [textBlock('命令失败输出')], { isError: true }),
+    userNode(1, [textBlock('先跑一次')]),
+    toolResultNode(2, 'call-7', [textBlock('命令失败输出')], { isError: true }),
+    userNode(3, [textBlock('继续')]),
+    toolResultNode(4, 'call-8', [textBlock('正常输出')], { isError: false }),
   ]), derivationContext());
   const recommended = moduleExports.applyRecommendations(candidates);
-  const tool = recommended.find((c) => c.role === 'tool');
-  assert.equal(tool.recommended, true);
-  assert.equal(tool.recommendReason, 'tool-error');
+  const byId = Object.fromEntries(recommended.map((c) => [c.id, c]));
+  // The error exchange is not the latest, so its reason is the precise tool-error.
+  assert.equal(byId['session-1:exchange:1'].recommended, true);
+  assert.equal(byId['session-1:exchange:1'].recommendReason, 'tool-error');
+  assert.equal(byId['session-1:exchange:1'].errorSource, 'tool');
+  // The latest clean exchange is recommended for recency, not error.
+  assert.equal(byId['session-1:exchange:3'].recommendReason, 'recent');
 });
 
 test('sensitive markers flag credential-like text advisory-only', () => {
@@ -209,22 +236,22 @@ test('sensitive markers flag credential-like text advisory-only', () => {
     userNode(2, [textBlock('完全普通的内容')]),
   ]), derivationContext());
   const byId = Object.fromEntries(candidates.map((c) => [c.id, c]));
-  assert.equal(byId['session-1:node:user:1'].sensitive, true);
-  assert.equal(byId['session-1:node:user:2'].sensitive, false);
+  assert.equal(byId['session-1:exchange:1'].sensitive, true);
+  assert.equal(byId['session-1:exchange:2'].sensitive, false);
 });
 
-test('confirmSourceCandidate captures the reviewed text snapshot with id, labels and advisory flags', () => {
+test('confirmSourceCandidate captures the reviewed exchange text snapshot with id, labels and advisory flags', () => {
   const candidates = moduleExports.deriveSourceCandidates(openSnapshot([
     userNode(1, [textBlock('SENTINEL_CONFIRMED 已审阅内容')]),
   ]), derivationContext());
-  const record = moduleExports.confirmSourceCandidate(candidates[1], '2026-01-01T00:00:00.000Z', '用户消息');
+  const record = moduleExports.confirmSourceCandidate(candidates[1], '2026-01-01T00:00:00.000Z', '完整交流');
   assert.deepEqual(record, {
-    id: 'session-1:node:user:1',
+    id: 'session-1:exchange:1',
     sessionId: 'session-1',
     kind: 'message',
     role: 'user',
-    label: '用户消息',
-    text: 'SENTINEL_CONFIRMED 已审阅内容',
+    label: '完整交流',
+    text: '用户消息:\nSENTINEL_CONFIRMED 已审阅内容',
     truncated: false,
     sensitive: false,
     capturedAt: '2026-01-01T00:00:00.000Z',

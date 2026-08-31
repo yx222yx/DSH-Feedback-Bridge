@@ -38,8 +38,7 @@ export interface SimilarityPanelProps {
  */
 export function SimilarityPanel({ t, state, onRetry }: SimilarityPanelProps): React.ReactElement {
   return (
-    <section className="dsh-feedback-similarity" data-testid="dsh-feedback-similarity">
-      <h3 className="dsh-feedback-section-title">{t('similarity.title')}</h3>
+    <section className="dsh-feedback-similarity">
       {state.phase === 'idle' ? (
         <p className="dsh-feedback-hint" data-testid="dsh-feedback-similarity-idle">{t('similarity.idleHint')}</p>
       ) : null}

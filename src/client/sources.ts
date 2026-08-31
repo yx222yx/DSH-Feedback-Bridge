@@ -14,8 +14,8 @@ export type SourceKind = 'message' | 'tool-result' | 'diagnostic';
 /** Speaker or producer role of one feedback source candidate. */
 export type SourceRole = 'user' | 'assistant' | 'steering' | 'context' | 'tool' | 'error' | 'session';
 
-/** Row preview cap, in characters. */
-export const SOURCE_PREVIEW_CHARS = 400;
+/** Row preview cap, in characters; rows stay compact so a crowded conversation does not dominate the panel. */
+export const SOURCE_PREVIEW_CHARS = 120;
 
 /**
  * Byte cap on one confirmed source's captured text snapshot. Mirrors the Host
@@ -46,6 +46,10 @@ export interface FeedbackSourceCandidate {
   recommendReason: 'recent' | 'error' | 'tool-error' | 'turn-error' | 'session' | null;
   sensitive: boolean;
   errorSignal: boolean;
+  /** Transient flag (never persisted): the candidate is one full exchange, not a single interaction row. */
+  exchange?: boolean;
+  /** Transient: which member carried the error signal, for a precise recommendation reason. */
+  errorSource?: 'tool' | 'turn';
 }
 
 /** One user-confirmed feedback source persisted with the draft (Host contract mirror). */
@@ -75,6 +79,13 @@ export interface SourceCopy {
   diagSession: string;
   turnMaxTokens: string;
   errorCode: string;
+  /** Role headers for exchange source text, e.g. 'User' / 'Assistant'. */
+  roleUser: string;
+  roleAssistant: string;
+  roleTool: string;
+  roleError: string;
+  roleSteering: string;
+  roleContext: string;
 }
 
 /** Session facts folded into the diagnostics candidate. */
@@ -218,82 +229,86 @@ function assistantBlocksText(blocks: readonly AssistantBlock[]): string {
   return parts.join('\n\n');
 }
 
-/**
- * Map one conversation node to a source candidate, or null when the node
- * kind is not feedback material (compaction markers, commands, retries).
- *
- * @param node - one conversation node.
- * @param sessionId - owning session id.
- * @returns the candidate or null.
- */
-function nodeCandidate(node: ConversationSnapshot['nodes'][number], sessionId: string, copy: SourceCopy): FeedbackSourceCandidate | null {
-  let role: SourceRole;
-  let kind: SourceKind;
-  let itemId: string;
-  let fullText: string;
-  let errorSignal = false;
+/** One node's contribution to an exchange source: a role header plus its visible text. */
+function exchangeNodeText(node: ConversationSnapshot['nodes'][number], copy: SourceCopy): string {
   switch (node.kind) {
     case 'user':
-      role = 'user';
-      kind = 'message';
-      itemId = 'node:user:' + node.seq;
-      fullText = contentText(node.content);
-      break;
+      return copy.roleUser + ':\n' + contentText(node.content);
     case 'steering':
-      role = 'steering';
-      kind = 'message';
-      itemId = 'node:steering:' + node.seq;
-      fullText = contentText(node.content);
-      break;
+      return copy.roleSteering + ':\n' + contentText(node.content);
     case 'context':
-      role = 'context';
-      kind = 'message';
-      itemId = 'node:context:' + node.seq;
-      fullText = contentText(node.content);
-      break;
+      return copy.roleContext + ':\n' + contentText(node.content);
     case 'assistant':
-      role = 'assistant';
-      kind = 'message';
-      itemId = 'node:assistant:' + node.seq;
-      fullText = assistantBlocksText(node.blocks);
-      break;
+      return copy.roleAssistant + ':\n' + assistantBlocksText(node.blocks);
     case 'tool-result':
-      role = 'tool';
-      kind = 'tool-result';
-      itemId = 'tool:' + node.callId;
-      fullText = contentText(node.content);
-      errorSignal = node.isError === true;
-      break;
+      return copy.roleTool + ':\n' + contentText(node.content);
     case 'turn-error':
-      role = 'error';
-      kind = 'diagnostic';
-      itemId = 'error:' + node.seq;
-      fullText = node.message + (node.code !== undefined ? '\n' + copy.errorCode + node.code : '');
-      errorSignal = true;
-      break;
+      return copy.roleError + ':\n' + node.message + (node.code !== undefined ? '\n' + copy.errorCode + node.code : '');
     case 'turn-max-tokens':
-      role = 'error';
-      kind = 'diagnostic';
-      itemId = 'error:' + node.seq;
-      fullText = copy.turnMaxTokens;
-      errorSignal = true;
-      break;
+      return copy.roleError + ':\n' + copy.turnMaxTokens;
+    default:
+      return '';
+  }
+}
+
+/** Whether a node carries an error signal for recommendation. */
+function nodeErrorSignal(node: ConversationSnapshot['nodes'][number]): 'tool' | 'turn' | null {
+  switch (node.kind) {
+    case 'tool-result':
+      return node.isError === true ? 'tool' : null;
+    case 'turn-error':
+    case 'turn-max-tokens':
+      return 'turn';
     default:
       return null;
   }
-  return {
-    id: sessionId + ':' + itemId,
-    itemId,
-    sessionId,
-    kind,
-    role,
-    preview: sourcePreview(fullText),
-    fullText,
-    recommended: false,
-    recommendReason: null,
-    sensitive: sensitiveMarkerHit(fullText),
-    errorSignal,
-  };
+}
+
+/** A grouped exchange: one user/steering prompt plus every node until the next prompt. */
+interface ExchangeGroup {
+  startSeq: number;
+  role: SourceRole;
+  parts: string[];
+  errorSource: 'tool' | 'turn' | null;
+  sensitive: boolean;
+}
+
+/**
+ * Group conversation nodes into exchanges: an exchange starts at a user or
+ * steering prompt and runs through the model's complete output (assistant
+ * reply, tool results, turn errors) until the next prompt. Leading context
+ * nodes attach to the first exchange. This makes one citable feedback source
+ * a full exchange instead of every individual interaction row.
+ *
+ * @param nodes - conversation nodes in order.
+ * @param copy - locale-owned labels.
+ * @returns the grouped exchanges.
+ */
+function groupExchanges(nodes: readonly ConversationSnapshot['nodes'][number][], copy: SourceCopy): ExchangeGroup[] {
+  const groups: ExchangeGroup[] = [];
+  let current: ExchangeGroup | null = null;
+  for (const node of nodes) {
+    if (node.kind === 'user' || node.kind === 'steering') {
+      const opening = exchangeNodeText(node, copy);
+      current = {
+        startSeq: node.seq,
+        role: node.kind === 'user' ? 'user' : 'steering',
+        parts: opening === '' ? [] : [opening],
+        errorSource: null,
+        sensitive: sensitiveMarkerHit(opening),
+      };
+      groups.push(current);
+    } else if (current !== null) {
+      const text = exchangeNodeText(node, copy);
+      if (text !== '') {
+        current.parts.push(text);
+        const error = nodeErrorSignal(node);
+        if (error !== null && current.errorSource === null) current.errorSource = error;
+        if (sensitiveMarkerHit(text)) current.sensitive = true;
+      }
+    }
+  }
+  return groups;
 }
 
 /**
@@ -332,13 +347,27 @@ export function deriveSourceCandidates(
   context: SourceDerivationContext,
 ): FeedbackSourceCandidate[] {
   if (snapshot.openState !== 'open') return [];
-  const messageCandidates: FeedbackSourceCandidate[] = [];
-  for (const node of snapshot.nodes) {
-    const candidate = nodeCandidate(node, context.sessionId, context.copy);
-    if (candidate !== null) messageCandidates.push(candidate);
-  }
-  if (messageCandidates.length === 0) return [];
-  messageCandidates.reverse();
+  const groups = groupExchanges(snapshot.nodes, context.copy);
+  if (groups.length === 0) return [];
+  const exchanges: FeedbackSourceCandidate[] = groups.map((group) => {
+    const fullText = group.parts.join('\n\n');
+    return {
+      id: context.sessionId + ':exchange:' + group.startSeq,
+      itemId: 'exchange:' + group.startSeq,
+      sessionId: context.sessionId,
+      kind: 'message',
+      role: group.role,
+      preview: sourcePreview(fullText),
+      fullText,
+      recommended: false,
+      recommendReason: null,
+      sensitive: group.sensitive || sensitiveMarkerHit(fullText),
+      errorSignal: group.errorSource !== null,
+      exchange: true,
+      errorSource: group.errorSource ?? undefined,
+    };
+  });
+  exchanges.reverse();
   const diagnostics: FeedbackSourceCandidate = {
     id: context.sessionId + ':session:meta',
     itemId: 'session:meta',
@@ -352,7 +381,7 @@ export function deriveSourceCandidates(
     sensitive: sensitiveMarkerHit(sessionDiagnosticsText(context)),
     errorSignal: false,
   };
-  return [diagnostics, ...messageCandidates].slice(0, MAX_CANDIDATES);
+  return [diagnostics, ...exchanges].slice(0, MAX_CANDIDATES);
 }
 
 /**
@@ -385,7 +414,7 @@ export function applyRecommendations(candidates: readonly FeedbackSourceCandidat
     if (candidate.recommended) continue;
     if (candidate.errorSignal) {
       candidate.recommended = true;
-      candidate.recommendReason = candidate.role === 'tool' ? 'tool-error' : 'turn-error';
+      candidate.recommendReason = candidate.errorSource === 'tool' || candidate.role === 'tool' ? 'tool-error' : 'turn-error';
     }
   }
   for (const candidate of result) {
