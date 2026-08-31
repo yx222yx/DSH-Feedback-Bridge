@@ -1691,6 +1691,17 @@ test('fake-backed submission records: a confirmed success persists a local recor
       assert.match(await page.locator('[data-testid^="dsh-feedback-record-facts-"]').first().innerText(), /fake-user/);
       assert.match(await page.locator('[data-testid="dsh-feedback-records-notracking"]').innerText(), /v0\.1 does not track/);
 
+      // Regression (Issue #13 UI fix): the submission records must never
+      // squeeze the workspace body out of existence — the body keeps a real,
+      // scrollable height with records present.
+      const bodyBox = await page.locator('.dsh-feedback-body').boundingBox();
+      assert.ok(bodyBox !== null && bodyBox.height >= 150, 'the workspace body must keep a usable height with records present (got ' + (bodyBox === null ? 'null' : bodyBox.height) + 'px)');
+      const recordsList = await page.locator('.dsh-feedback-records-list').evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return { maxHeight: cs.maxHeight, overflowY: cs.overflowY };
+      });
+      assert.notEqual(recordsList.maxHeight, 'none', 'the records list must be height-capped so it scrolls internally');
+
       // The persisted record file carries only the public reference fields.
       await waitForFile(recordsPath, () => existsSync(recordsPath) && readFileSync(recordsPath, 'utf8').includes('Final preview test'));
       const onDisk = readFileSync(recordsPath, 'utf8');
